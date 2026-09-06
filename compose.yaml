@@ -60,7 +60,7 @@ services:
       memlock: -1
     networks: [inference]
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/health >/dev/null"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)\""]
       interval: 15s
       timeout: 5s
       retries: 5
