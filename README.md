@@ -7,7 +7,7 @@ Core principle: Caddy exposes one authenticated API, while llama-swap is the onl
 
 Setup: Copy `.env.example` to `.env`, set host paths and credentials, create the PostgreSQL password file, download the documented model artifacts, then run `docker compose up -d`. Add `--profile rag` to enable PostgreSQL with pgvector.
 
-Workflow: The default `orchestration` profile sends planner, architect, reviewer, and general roles to persistent Halogen Qwen. Embedding and reranking processes preload and remain available beside Qwen. Switch to the `engineering` profile only when Ornith should receive implementation roles. Query `GET /api/profiles` and update the profile through `PUT /api/profiles/active`.
+Workflow: The default `orchestration` profile sends planner, architect, reviewer, and general roles to Halogen Qwen. llama-swap starts Qwen on its first routed request and can unload it explicitly through its UI or API. Embedding and reranking processes preload and remain available beside Qwen. Switch to the `engineering` profile only when Ornith should receive implementation roles. Query `GET /api/profiles` and update the profile through `PUT /api/profiles/active`.
 
 API guide: Use `/v1/chat/completions` with `model` set to a stable `role/...` ID. Use `role/embed` through `/v1/embeddings` and `role/rerank` through `/v1/rerank`. The llama-swap administrative API is protected by the same Caddy authentication.
 
@@ -31,7 +31,7 @@ Reliable Docker Compose inference for a dedicated Ryzen AI Max+ 395 / Radeon 806
 | `role/embed` | Qwen3-Embedding-4B | Qwen3-Embedding-4B |
 | `role/rerank` | BGE reranker v2-m3 | BGE reranker v2-m3 |
 
-Qwen and retrieval are always-hot in the normal orchestration mode. Halogen has two 131K slots sharing a 262K total KV pool. The Qwen service has no automatic TTL unload.
+Retrieval preloads at startup. llama-swap loads Qwen on its first role request and keeps it loaded (`ttl: 0`) until an explicit llama-swap unload action. Halogen has two 131K slots sharing a 262K total KV pool.
 
 ## Start
 
@@ -74,7 +74,18 @@ curl -k -u "$CADDY_API_USER:$PASSWORD" \
   --data '{"name":"engineering"}'
 ```
 
-The role profile changes routing and request parameters. `:think` and `:fast` variants of Ornith reuse one loaded process; they do not reload model weights.
+The role profile changes routing and request parameters. `:think` and `:fast` variants reuse one loaded process; they do not reload model weights.
+
+## Qwen lifecycle
+
+llama-swap owns the Halogen process. The first request for a Qwen role starts Halogen and waits for `/health`; cold loading can take minutes. It remains loaded until explicitly removed:
+
+```bash
+curl -k -u "$CADDY_API_USER:$PASSWORD" \
+  -X POST https://localhost:8443/api/models/unload/qwen3.8-flash-next
+```
+
+The next Qwen role request starts it again. There is no idle TTL unload.
 
 ## Sources
 
