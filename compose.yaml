@@ -25,39 +25,26 @@ services:
     cap_drop: [ALL]
 
   llama-swap:
-    image: ghcr.io/mostlygeek/llama-swap:unified-vulkan
+    image: strix-halo/llama-swap-halogen:local
+    build:
+      context: .
+      dockerfile: docker/llama-swap-halogen/Dockerfile
     restart: unless-stopped
     environment:
       LLAMA_SWAP_CONFIG: /etc/llama-swap/config/config.yaml
       LLAMA_SWAP_LISTEN: 0.0.0.0:8080
       LLAMA_SWAP_WATCH_CONFIG: "true"
-    volumes:
-      - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
-      - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
-    devices:
-      - /dev/dri:/dev/dri
-    group_add: ["render", "video"]
-    networks: [inference]
-    healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/health >/dev/null"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-
-  halogen:
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.4.4
-    restart: unless-stopped
-    environment:
-      HALOGEN_API_PORT: "8731"
       HALOGEN_MODEL_ID: qwen3.8-flash-next
+      HALOGEN_CHECKPOINT: /models/halogen/qwen38-flash-next-w4b.hgn
       HALOGEN_KV_SLOTS: "2"
       HALOGEN_CTX: "131072"
       HALOGEN_KV_POOL_POSITIONS: "262144"
       HALOGEN_HOST_RESERVE_GIB: "${HALOGEN_HOST_RESERVE_GIB:-28}"
       HALOGEN_PROMPT_CACHE: "2"
     volumes:
-      - ${HALOGEN_MODELS_DIR:?set HALOGEN_MODELS_DIR in .env}:/models:ro
+      - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
+      - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
+      - ${HALOGEN_MODELS_DIR:?set HALOGEN_MODELS_DIR in .env}:/models/halogen:ro
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
@@ -68,11 +55,11 @@ services:
       memlock: -1
     networks: [inference]
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8731/health', timeout=3)\""]
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/health >/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 20m
+      start_period: 30s
 
   postgres:
     image: pgvector/pgvector:0.8.6-pg17-bookworm

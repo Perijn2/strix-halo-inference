@@ -1,11 +1,11 @@
 # Author: Perijn
-# Summary: Routes all inference roles through llama-swap while preserving Qwen and retrieval availability.
-# Usage: Caddy sends every API request here. Activate a profile with PUT /api/profiles/active and request its stable role IDs.
-# Qwen is a permanently running Halogen peer; local retrieval processes preload and remain loaded after their first startup.
+# Summary: Makes llama-swap the lifecycle manager and sole router for Qwen, Ornith, embedding, and reranking models.
+# Usage: Caddy sends every API request here. llama-swap loads a model on its first request and its UI/API can unload it explicitly.
+# The orchestration profile maps Qwen roles to request-only thinking variants without reloading its Halogen process.
 apiKeys: []
 
 globalTTL: 0
-unloadTimeout: 30
+unloadTimeout: 60
 
 hooks:
   on_startup:
@@ -14,20 +14,40 @@ hooks:
 
 routing:
   router:
-    use: group
+    use: matrix
     settings:
-      groups:
-        retrieval:
-          members: [qwen3-embedding-4b, bge-reranker-v2-m3]
-          persistent: true
-          swap: false
-          exclusive: false
-        ornith:
-          members: [ornith-1.5-35b-a3b]
-          swap: true
-          exclusive: false
+      matrix:
+        vars:
+          q: qwen3.8-flash-next
+          o: ornith-1.5-35b-a3b
+          e: qwen3-embedding-4b
+          r: bge-reranker-v2-m3
+        evict_costs:
+          q: 100
+          o: 20
+        sets:
+          qwen-rag: "q & e & r"
+          ornith-rag: "o & e & r"
 
 models:
+  qwen3.8-flash-next:
+    name: Qwen3.8 Flash Next
+    description: Halogen-managed orchestrator, architect, planner, and reviewer model.
+    cmd: |
+      halogen-launch all
+    env:
+      - "HALOGEN_API_PORT=${PORT}"
+    checkEndpoint: /health
+    ttl: 0
+    filters:
+      setParamsByID:
+        "${MODEL_ID}:think":
+          enable_thinking: true
+          reasoning_effort: high
+        "${MODEL_ID}:fast":
+          enable_thinking: false
+          reasoning_effort: low
+
   ornith-1.5-35b-a3b:
     name: Ornith 1.5 35B A3B
     description: Implementation, testing, and documentation model.
@@ -73,39 +93,14 @@ models:
     checkEndpoint: /health
     ttl: 0
 
-peers:
-  qwen-thinking:
-    proxy: http://halogen:8731
-    models: [qwen3.8-flash-next]
-    timeouts:
-      connect: 30
-      responseHeader: 1200
-      idleConn: 90
-    filters:
-      setParams:
-        enable_thinking: true
-        reasoning_effort: high
-
-  qwen-fast:
-    proxy: http://halogen:8731
-    models: [qwen3.8-flash-next]
-    timeouts:
-      connect: 30
-      responseHeader: 1200
-      idleConn: 90
-    filters:
-      setParams:
-        enable_thinking: false
-        reasoning_effort: low
-
 profiles:
   orchestration:
     description: Qwen plans, reviews, and orchestrates while retrieval remains available.
     pins:
-      role/orchestrator: qwen-thinking/qwen3.8-flash-next
-      role/architect: qwen-thinking/qwen3.8-flash-next
-      role/reviewer: qwen-thinking/qwen3.8-flash-next
-      role/general: qwen-fast/qwen3.8-flash-next
+      role/orchestrator: qwen3.8-flash-next:think
+      role/architect: qwen3.8-flash-next:think
+      role/reviewer: qwen3.8-flash-next:think
+      role/general: qwen3.8-flash-next:fast
       role/embed: qwen3-embedding-4b
       role/rerank: bge-reranker-v2-m3
       role/implementer: ~
