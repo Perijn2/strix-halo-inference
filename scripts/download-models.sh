@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Author: Perijn
-# Summary: Downloads the GGUF retrieval and Ornith artifacts expected by llama-swap.
-# Usage: Set MODELS_DIR, install `hf` from huggingface_hub, then run this script once; Hugging Face resumes interrupted downloads.
-# The script deliberately does not download Halogen weights because their destination and storage policy are configured separately.
+# Summary: Downloads the retrieval GGUF artifacts required by llama-swap.
+# Usage: Install the user-supplied Ornith ROCMFP4 GGUF at the documented path, set MODELS_DIR, install `hf`, then run this script.
+# The script deliberately does not download Ornith or Halogen weights because their selected artifacts are installed separately.
 set -euo pipefail
 
 : "${MODELS_DIR:?Set MODELS_DIR to the directory mounted at /models.}"
@@ -11,9 +11,12 @@ command -v hf >/dev/null || {
   exit 1
 }
 
-hf download ornith-ai/Ornith-1.5-35B-A3B-GGUF \
-  Ornith-1.5-35B-Q4_K_M.gguf \
-  --local-dir "$MODELS_DIR/ornith"
+ornith_path="$MODELS_DIR/ornith/Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf"
+[[ -r "$ornith_path" ]] || {
+  printf 'Install the selected Ornith GGUF first: %s\n' "$ornith_path" >&2
+  exit 1
+}
+
 hf download Qwen/Qwen3-Embedding-4B-GGUF \
   Qwen3-Embedding-4B-Q6_K.gguf \
   --local-dir "$MODELS_DIR/qwen3-embedding"

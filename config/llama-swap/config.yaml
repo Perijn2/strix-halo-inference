@@ -54,10 +54,12 @@ models:
     cmd: |
       llama-server
       --host 127.0.0.1 --port ${PORT}
-      --model /models/ornith/Ornith-1.5-35B-Q4_K_M.gguf
+      --model /models/ornith/Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf
       --alias ornith-1.5-35b-a3b
       --jinja --flash-attn on --n-gpu-layers 999
       --ctx-size 65536 --parallel 2
+    env:
+      - "GGML_VK_DENSE_WAVE32=1"
     checkEndpoint: /health
     ttl: 0
     filters:

@@ -52,14 +52,14 @@ docker compose --profile rag up -d
 The `MODELS_DIR` mount must contain:
 
 ```text
-ornith/Ornith-1.5-35B-Q4_K_M.gguf
+ornith/Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf
 qwen3-embedding/Qwen3-Embedding-4B-Q6_K.gguf
 bge-reranker/bge-reranker-v2-m3-Q8_0.gguf
 ```
 
 `HALOGEN_MODELS_DIR` is the flat model directory downloaded from the Halogen Qwen repository; it contains the `.hgn` checkpoint, quality overlay, and `tokenizer/` directory.
 
-Use [`scripts/download-models.sh`](scripts/download-models.sh) to fetch the GGUF artifacts. Read [docs/operations.md](docs/operations.md) before operating Halogen.
+Install the selected Ornith ROCMFP4 STRIX LEAN GGUF at the path above, then use [`scripts/download-models.sh`](scripts/download-models.sh) to fetch retrieval GGUF artifacts. Read [docs/operations.md](docs/operations.md) before operating Halogen.
 
 ## Profile switching
 
