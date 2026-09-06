@@ -37,18 +37,15 @@ Retrieval preloads at startup. llama-swap loads Qwen on its first role request a
 
 ```bash
 cp .env.example .env
-# Edit .env, create its POSTGRES_PASSWORD_FILE, and replace the default Caddy hash.
+# Edit model paths in .env, then generate local credentials.
+./scripts/generate-secrets.sh
 docker compose up -d
 # Optional durable RAG storage:
 docker compose --profile rag up -d
 # Localhost uses Caddy's local certificate; use -k for local curl tests.
 ```
 
-Use a Caddy password hash rather than a clear-text password:
-
-```bash
-docker run --rm caddy:2-alpine caddy hash-password --plaintext 'choose-a-password'
-```
+`scripts/generate-secrets.sh` writes Caddy and PostgreSQL passwords to the ignored `secrets/` directory and updates `.env` with the Caddy bcrypt hash and PostgreSQL password-file path. It never prints the passwords. Run it with `--force` only when intentionally rotating both credentials.
 
 ## Model files
 
