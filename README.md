@@ -45,7 +45,7 @@ docker compose --profile rag up -d
 # Localhost uses Caddy's local certificate; use -k for local curl tests.
 ```
 
-`scripts/generate-secrets.sh` writes Caddy and PostgreSQL passwords to the ignored `secrets/` directory and updates `.env` with the Caddy bcrypt hash and PostgreSQL password-file path. It never prints the passwords. Run it with `--force` only when intentionally rotating both credentials.
+`scripts/generate-secrets.sh` writes Caddy and PostgreSQL passwords to the ignored `secrets/` directory, escapes the Caddy bcrypt hash for Compose, and records numeric host `render`/`video` group IDs in `.env`. It never prints the passwords. Run it with `--force` only when intentionally rotating both credentials.
 
 ## Model files
 

@@ -48,7 +48,9 @@ services:
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
-    group_add: ["render", "video"]
+    group_add:
+      - "${RENDER_GID:?run scripts/generate-secrets.sh to set RENDER_GID}"
+      - "${VIDEO_GID:?run scripts/generate-secrets.sh to set VIDEO_GID}"
     security_opt: [seccomp:unconfined]
     ipc: host
     ulimits:
