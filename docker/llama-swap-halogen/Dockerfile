@@ -1,16 +1,27 @@
 # Author: Perijn
 # Summary: Packages llama-swap, Laurent llama.cpp, and Halogen so one router controls every local model lifecycle.
 # Usage: Docker Compose builds this image for the llama-swap service; model commands invoke the bundled servers as supervised child processes.
-FROM golang:1.27-bookworm AS llama_swap_build
+FROM golang:1.27-bookworm AS llama_swap_source
 
 ARG LLAMA_SWAP_REF=7761aa13360ea379cb89366d07c2d08aa9f1ed10
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone https://github.com/mostlygeek/llama-swap.git /src \
-    && git -C /src checkout "${LLAMA_SWAP_REF}" \
-    && cd /src \
-    && go build -trimpath -o /out/llama-swap .
+    && git -C /src checkout "${LLAMA_SWAP_REF}"
+
+FROM node:24-bookworm AS llama_swap_ui_build
+
+COPY --from=llama_swap_source /src /src
+RUN cd /src/ui \
+    && npm ci \
+    && npm run build
+
+FROM llama_swap_source AS llama_swap_build
+
+COPY --from=llama_swap_ui_build /src/internal/server/ui_dist /src/internal/server/ui_dist
+RUN cd /src \
+    && go build -tags embed_ui -trimpath -o /out/llama-swap .
 
 FROM ubuntu:24.04 AS llama_cpp_build
 
