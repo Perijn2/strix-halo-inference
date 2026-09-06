@@ -2,6 +2,8 @@
 # Summary: Forwards the public inference API to llama-swap without application-level authentication.
 # Usage: Restrict network access with a host firewall or private network before exposing this listener.
 {$CADDY_SITE:localhost} {
+	tls internal
+
 	log {
 		output stdout
 		format console
