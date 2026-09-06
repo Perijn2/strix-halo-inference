@@ -34,9 +34,7 @@ models:
     name: Qwen3.8 Flash Next
     description: Halogen-managed orchestrator, architect, planner, and reviewer model.
     cmd: |
-      halogen-launch all
-    env:
-      - "HALOGEN_API_PORT=${PORT}"
+      HALOGEN_API_PORT=${PORT} halogen-launch all
     checkEndpoint: /health
     ttl: 0
     filters:

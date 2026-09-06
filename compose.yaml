@@ -30,10 +30,13 @@ services:
       context: .
       dockerfile: docker/llama-swap-halogen/Dockerfile
     restart: unless-stopped
+    command:
+      - -config
+      - /etc/llama-swap/config/config.yaml
+      - -listen
+      - 0.0.0.0:8080
+      - -watch-config
     environment:
-      LLAMA_SWAP_CONFIG: /etc/llama-swap/config/config.yaml
-      LLAMA_SWAP_LISTEN: 0.0.0.0:8080
-      LLAMA_SWAP_WATCH_CONFIG: "true"
       HALOGEN_MODEL_ID: qwen3.8-flash-next
       HALOGEN_CHECKPOINT: /halogen-models/qwen38-flash-next-w4b.hgn
       HALOGEN_KV_SLOTS: "2"
