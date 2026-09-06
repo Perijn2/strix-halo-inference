@@ -19,8 +19,6 @@ services:
       llama-swap:
         condition: service_healthy
     networks: [edge, inference]
-    security_opt: [no-new-privileges:true]
-    cap_drop: [ALL]
 
   llama-swap:
     image: strix-halo/llama-swap-halogen:local
