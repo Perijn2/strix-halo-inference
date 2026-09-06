@@ -35,7 +35,7 @@ services:
       LLAMA_SWAP_LISTEN: 0.0.0.0:8080
       LLAMA_SWAP_WATCH_CONFIG: "true"
       HALOGEN_MODEL_ID: qwen3.8-flash-next
-      HALOGEN_CHECKPOINT: /models/halogen/qwen38-flash-next-w4b.hgn
+      HALOGEN_CHECKPOINT: /halogen-models/qwen38-flash-next-w4b.hgn
       HALOGEN_KV_SLOTS: "2"
       HALOGEN_CTX: "131072"
       HALOGEN_KV_POOL_POSITIONS: "262144"
@@ -44,7 +44,7 @@ services:
     volumes:
       - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
       - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
-      - ${HALOGEN_MODELS_DIR:?set HALOGEN_MODELS_DIR in .env}:/models/halogen:ro
+      - ${HALOGEN_MODELS_DIR:?set HALOGEN_MODELS_DIR in .env}:/halogen-models:ro
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
