@@ -11,7 +11,7 @@ Workflow: Check Caddy and llama-swap health. The first Qwen role request starts 
 
 API guide: `/health` verifies individual server readiness, `/v1/models` lists callable role IDs, and `/api/profiles` reports or changes llama-swap routing state.
 
-Worked example: Start the default stack, query `/v1/models` through authenticated Caddy, switch the active profile to `engineering`, submit `role/implementer`, then restore `orchestration`.
+Worked example: Start the default stack, query `/v1/models` through Caddy, switch the active profile to `engineering`, submit `role/implementer`, then restore `orchestration`.
 -->
 
 # Operations

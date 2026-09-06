@@ -1,14 +1,10 @@
 # Author: Perijn
-# Summary: Authenticates and forwards the public inference API to llama-swap.
-# Usage: Compose injects CADDY_API_USER and CADDY_API_PASSWORD_HASH; clients use HTTP Basic authentication.
+# Summary: Forwards the public inference API to llama-swap without application-level authentication.
+# Usage: Restrict network access with a host firewall or private network before exposing this listener.
 {$CADDY_SITE:localhost} {
 	log {
 		output stdout
 		format console
-	}
-
-	basic_auth {
-		{$CADDY_API_USER} {$CADDY_API_PASSWORD_HASH}
 	}
 
 	request_body {

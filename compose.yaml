@@ -1,6 +1,6 @@
 # Author: Perijn
 # Summary: Runs the Strix Halo inference gateway, permanent Qwen service, and optional RAG database.
-# Usage: Copy .env.example to .env, configure model directories and Caddy credentials, then run `docker compose up -d`.
+# Usage: Copy .env.example to .env, configure model directories and host group IDs, then run `docker compose up -d`.
 # The default topology keeps Qwen, embedding, and reranking available; add `--profile rag` for PostgreSQL.
 services:
   caddy:
@@ -11,8 +11,6 @@ services:
       - "${CADDY_HTTPS_PORT:-8443}:443"
     environment:
       CADDY_SITE: ${CADDY_SITE:-localhost}
-      CADDY_API_USER: ${CADDY_API_USER:-inference}
-      CADDY_API_PASSWORD_HASH: ${CADDY_API_PASSWORD_HASH:?set CADDY_API_PASSWORD_HASH in .env}
     volumes:
       - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

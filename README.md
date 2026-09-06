@@ -3,15 +3,15 @@ Author: Perijn
 Summary: Deploys a role-routed AI inference stack for a Strix Halo Ryzen AI Max+ 395 host.
 
 Usage:
-Core principle: Caddy exposes one authenticated API, while llama-swap is the only inference router and presents stable role IDs to clients.
+Core principle: Caddy exposes the unauthenticated API and UI on the configured listener, while llama-swap is the only inference router and presents stable role IDs to clients. Restrict host network access before exposing this listener.
 
-Setup: Copy `.env.example` to `.env`, set host paths and credentials, create the PostgreSQL password file, download the documented model artifacts, then run `docker compose up -d`. Add `--profile rag` to enable PostgreSQL with pgvector.
+Setup: Copy `.env.example` to `.env`, set host paths, run the generator to create the PostgreSQL password file and host group settings, download the documented model artifacts, then run `docker compose up -d`. Add `--profile rag` to enable PostgreSQL with pgvector.
 
 Workflow: The default `orchestration` profile sends planner, architect, reviewer, and general roles to Halogen Qwen. llama-swap starts Qwen on its first routed request and can unload it explicitly through its UI or API. Embedding and reranking processes preload and remain available beside Qwen. Switch to the `engineering` profile only when Ornith should receive implementation roles. Query `GET /api/profiles` and update the profile through `PUT /api/profiles/active`.
 
-API guide: Use `/v1/chat/completions` with `model` set to a stable `role/...` ID. Use `role/embed` through `/v1/embeddings` and `role/rerank` through `/v1/rerank`. The llama-swap administrative API is protected by the same Caddy authentication.
+API guide: Use `/v1/chat/completions` with `model` set to a stable `role/...` ID. Use `role/embed` through `/v1/embeddings` and `role/rerank` through `/v1/rerank`. The llama-swap UI is available at `/ui`; its administrative API is unauthenticated.
 
-Worked example: Run `cp .env.example .env`, replace its paths and Caddy password hash, start `docker compose up -d`, then call `curl -k -u inference:<password> https://localhost:8443/v1/models`. Select the engineering profile before sending a request with `model: role/implementer`.
+Worked example: Run `cp .env.example .env`, configure paths, run `scripts/generate-secrets.sh`, start `docker compose up -d`, then call `curl -k https://localhost:8443/v1/models`. Select the engineering profile before sending a request with `model: role/implementer`.
 -->
 
 # Strix Halo inference
@@ -45,7 +45,7 @@ docker compose --profile rag up -d
 # Localhost uses Caddy's local certificate; use -k for local curl tests.
 ```
 
-`scripts/generate-secrets.sh` writes Caddy and PostgreSQL passwords to the ignored `secrets/` directory, escapes the Caddy bcrypt hash for Compose, and records numeric host `render`/`video` group IDs in `.env`. It never prints the passwords. Run it with `--force` only when intentionally rotating both credentials.
+`scripts/generate-secrets.sh` writes the PostgreSQL password to the ignored `secrets/` directory and records numeric host `render`/`video` group IDs in `.env`. Run it with `--force` only when intentionally rotating the database credential.
 
 ## Model files
 
@@ -64,8 +64,8 @@ Install the selected Ornith ROCMFP4 STRIX LEAN GGUF at the path above, then use 
 ## Profile switching
 
 ```bash
-curl -k -u "$CADDY_API_USER:$PASSWORD" https://localhost:8443/api/profiles
-curl -k -u "$CADDY_API_USER:$PASSWORD" \
+curl -k https://localhost:8443/api/profiles
+curl -k \
   -X PUT https://localhost:8443/api/profiles/active \
   -H 'content-type: application/json' \
   --data '{"name":"engineering"}'
@@ -78,7 +78,7 @@ The role profile changes routing and request parameters. `:think` and `:fast` va
 llama-swap owns the Halogen process. The first request for a Qwen role starts Halogen and waits for `/health`; cold loading can take minutes. It remains loaded until explicitly removed:
 
 ```bash
-curl -k -u "$CADDY_API_USER:$PASSWORD" \
+curl -k \
   -X POST https://localhost:8443/api/models/unload/qwen3.8-flash-next
 ```
 
