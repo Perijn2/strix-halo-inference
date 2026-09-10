@@ -13,5 +13,5 @@ postgres_password_file="$(awk -F= '/^POSTGRES_PASSWORD_FILE=/ { print substr($0,
 [[ -n "$postgres_password_file" ]] || { printf '%s\n' 'POSTGRES_PASSWORD_FILE is required in .env.'; exit 1; }
 test -r "$postgres_password_file" || { printf 'Cannot read POSTGRES_PASSWORD_FILE: %s\n' "$postgres_password_file"; exit 1; }
 
-docker compose --profile rag config >/dev/null
+docker compose config -q
 printf '%s\n' 'Compose configuration is valid.'
