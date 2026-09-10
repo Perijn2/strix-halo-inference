@@ -1,7 +1,6 @@
 # Author: Perijn
-# Summary: Makes llama-swap the lifecycle manager and sole router for Qwen, Ornith, embedding, and reranking models.
-# Usage: Caddy sends every API request here. llama-swap loads a model on its first request and its UI/API can unload it explicitly.
-# The orchestration profile maps Qwen roles to request-only thinking variants without reloading its Halogen process.
+# Summary: Keeps every Strix Halo inference model concurrently available and exposes role-specific model IDs without runtime profile switching.
+# Usage: Caddy forwards API requests to llama-swap. llama-swap preloads every model and retains it until explicitly unloaded.
 apiKeys: []
 
 globalTTL: 0
@@ -9,8 +8,11 @@ unloadTimeout: 60
 
 hooks:
   on_startup:
-    profile: orchestration
-    preload: [qwen3-embedding-4b, bge-reranker-v2-m3]
+    preload:
+      - qwen3.8-flash-next
+      - ornith-1.5-35b-a3b
+      - qwen3-embedding-4b
+      - bge-reranker-v2-m3
 
 routing:
   router:
@@ -22,12 +24,19 @@ routing:
           o: ornith-1.5-35b-a3b
           e: qwen3-embedding-4b
           r: bge-reranker-v2-m3
+          x: ocr-ensemble
         evict_costs:
           q: 100
           o: 20
+          e: 10
+          r: 10
+          # This cost applies only to the supervised socat forwarder. The OCR
+          # models themselves live in the memory-capped sidecar container.
+          x: 100
+        # One complete set permits all llama-swap children and the OCR forwarder
+        # to remain loaded and serve requests concurrently.
         sets:
-          qwen-rag: "q & e & r"
-          ornith-rag: "o & e & r"
+          all-models: "q & o & e & r & x"
 
 models:
   qwen3.8-flash-next:
@@ -37,18 +46,54 @@ models:
       HALOGEN_API_PORT=${PORT} halogen-launch all
     checkEndpoint: /health
     ttl: 0
+    capabilities:
+      in: [text]
+      out: [text]
+      tools: true
+      context: 262144
+    # llama-swap's native capabilities schema has no reasoning property. These
+    # fields are valid model metadata published through /v1/models.
+    metadata:
+      reasoning: true
+      reasoning_levels: [low, medium, high, xhigh]
+      reasoning_level_parameter: reasoning_effort
     filters:
+      # Qwen official thinking-mode defaults. DSH can override either
+      # enable_thinking or reasoning_effort on the base model request.
+      setParams:
+        enable_thinking?: true
+        reasoning_effort?: high
+        temperature?: 1.0
+        top_p?: 0.95
+        top_k?: 20
+        min_p?: 0.0
+        presence_penalty?: 0.0
+        repetition_penalty?: 1.0
+      # Preserve the stable agent-role endpoints without exposing Qwen effort
+      # variants as separate general-purpose models.
       setParamsByID:
-        "${MODEL_ID}:think":
+        role/orchestrator:
           enable_thinking: true
           reasoning_effort: high
-        "${MODEL_ID}:fast":
+        role/architect:
+          enable_thinking: true
+          reasoning_effort: high
+        role/reviewer:
+          enable_thinking: true
+          reasoning_effort: high
+        role/general:
           enable_thinking: false
           reasoning_effort: low
+          temperature: 0.7
+          top_p: 0.80
+          top_k: 20
+          min_p: 0.0
+          presence_penalty: 1.5
+          repetition_penalty: 1.0
 
   ornith-1.5-35b-a3b:
     name: Ornith 1.5 35B A3B
-    description: Implementation, testing, and documentation model.
+    description: Reasoning model for implementation, testing, and documentation.
     cmd: |
       llama-server
       --host 127.0.0.1 --port ${PORT}
@@ -60,11 +105,25 @@ models:
       - "GGML_VK_DENSE_WAVE32=1"
     checkEndpoint: /health
     ttl: 0
+    capabilities:
+      in: [text]
+      out: [text]
+      tools: true
+      context: 65536
+    metadata:
+      reasoning: true
     filters:
+      setParams:
+        enable_thinking?: true
+        temperature?: 0.6
+        top_p?: 0.95
+        top_k?: 20
       setParamsByID:
-        "${MODEL_ID}:think":
+        role/implementer:
           enable_thinking: true
-        "${MODEL_ID}:fast":
+        role/tester:
+          enable_thinking: true
+        role/documenter:
           enable_thinking: false
 
   qwen3-embedding-4b:
@@ -79,6 +138,11 @@ models:
       --ctx-size 8192 --batch-size 2048 --ubatch-size 512
     checkEndpoint: /health
     ttl: 0
+    aliases: [role/embed]
+    capabilities:
+      in: [text]
+      out: [text]
+      context: 8192
 
   bge-reranker-v2-m3:
     name: BGE Reranker v2 M3
@@ -92,30 +156,29 @@ models:
       --ctx-size 8192
     checkEndpoint: /health
     ttl: 0
+    aliases: [role/rerank]
+    capabilities:
+      in: [text]
+      out: [text]
+      reranker: true
+      context: 8192
 
-profiles:
-  orchestration:
-    description: Qwen plans, reviews, and orchestrates while retrieval remains available.
-    pins:
-      role/orchestrator: qwen3.8-flash-next:think
-      role/architect: qwen3.8-flash-next:think
-      role/reviewer: qwen3.8-flash-next:think
-      role/general: qwen3.8-flash-next:fast
-      role/embed: qwen3-embedding-4b
-      role/rerank: bge-reranker-v2-m3
-      role/implementer: ~
-      role/tester: ~
-      role/documenter: ~
-
-  engineering:
-    description: Ornith implements, tests, and documents while retrieval remains available.
-    pins:
-      role/orchestrator: ~
-      role/architect: ~
-      role/reviewer: ~
-      role/general: ornith-1.5-35b-a3b:fast
-      role/implementer: ornith-1.5-35b-a3b:think
-      role/tester: ornith-1.5-35b-a3b:think
-      role/documenter: ornith-1.5-35b-a3b:fast
-      role/embed: qwen3-embedding-4b
-      role/rerank: bge-reranker-v2-m3
+  # This is a genuine llama-swap child process, not a pretend remote model: the
+  # supervised local forwarder owns ${PORT} and relays to the isolated Python
+  # sidecar. Unload kills the forwarder but intentionally never destroys its
+  # pre-warmed sidecar, which has its own 12 GiB container memory boundary.
+  ocr-ensemble:
+    name: OCR ensemble
+    description: MinerU primary parser validated by PP-OCRv5, Tesseract, and Surya with consensus-entropy review routing.
+    cmd: |
+      exec socat TCP-LISTEN:${PORT},fork,reuseaddr TCP:ocr-ensemble:8090
+    checkEndpoint: /health
+    ttl: 0
+    aliases: [role/ocr]
+    capabilities:
+      in: [image]
+      out: [text]
+    metadata:
+      audit_endpoint: /ocr
+      fusion: consensus-entropy
+      primary: MinerU2.5-Pro-2605-1.2B

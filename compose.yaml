@@ -1,8 +1,13 @@
 # Author: Perijn
-# Summary: Runs the Strix Halo inference gateway, permanent Qwen service, and optional RAG database.
-# Usage: Copy .env.example to .env, configure model directories and host group IDs, then run `docker compose up -d`.
-# The default topology keeps Qwen, embedding, and reranking available; add `--profile rag` for PostgreSQL.
+# Summary: Runs the Strix Halo inference gateway, GGUF/Halogen router, four-engine OCR ensemble, and durable PostgreSQL audit/RAG ledger.
+# Usage: Copy .env.example to .env, configure model directories and host group IDs, run scripts/download-models.sh, then run `docker compose up -d`.
+# Core principle: Caddy exposes only llama-swap; llama-swap owns stable role IDs. role/ocr is a supervised local forwarder to an isolated Python ensemble.
+# Setup: Download the model artifacts before starting. The OCR workers retain the strict 12 GiB combined default cap: 6 GiB for MinerU/classical engines, 2 GiB for the Surya SDK client, and 4 GiB for the Surya VLM worker.
+# Workflow: Query /v1/chat/completions with model role/ocr for plain fused text; call the internal /ocr endpoint through llama-swap upstream access only when you need the audit payload.
+# API guide: /v1/models lists role IDs. /v1/chat/completions accepts a base64 image_url for role/ocr. /upstream/ocr-ensemble/ocr exposes the structured OCR review result.
+# Worked example: `docker compose up -d`, then POST an OpenAI image message with `model: role/ocr` to Caddy. Pages with the review flag must go to a human queue.
 services:
+  # Summary: TLS edge proxy that exposes Caddy's public listener and forwards every inference request to llama-swap.
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -13,6 +18,7 @@ services:
       CADDY_SITE: ${CADDY_SITE:-localhost}
     volumes:
       - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web/ocr-playground:/srv/ocr-playground:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
@@ -20,6 +26,7 @@ services:
         condition: service_healthy
     networks: [edge, inference]
 
+  # Summary: Single public inference router and lifecycle owner for Halogen, llama.cpp models, and the supervised OCR forwarder.
   llama-swap:
     image: strix-halo/llama-swap-halogen:local
     build:
@@ -62,9 +69,138 @@ services:
       retries: 5
       start_period: 30s
 
+  # Summary: Memory-capped Python coordinator for MinerU, PP-OCRv5, Tesseract, and Consensus Entropy; calls the compatible Surya SDK client over the internal network.
+  # Notes: Default CPU execution avoids unvalidated gfx1151 ROCm/Paddle paths. Switching MinerU to vLLM requires a separately validated TheRock image and an explicit utilization cap.
+  ocr-ensemble:
+    image: strix-halo/ocr-ensemble:local
+    build:
+      context: .
+      dockerfile: docker/ocr-ensemble/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      surya-client:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      MODELS_DIR: /models
+      OCR_DEVICE: "${OCR_DEVICE:-cpu}"
+      OCR_MINERU_BACKEND: "${OCR_MINERU_BACKEND:-transformers}"
+      OCR_MINERU_MODEL_PATH: /models/mineru/MinerU2.5-Pro-2605-1.2B
+      OCR_VLLM_GPU_MEMORY_UTILIZATION: "${OCR_VLLM_GPU_MEMORY_UTILIZATION:-0.35}"
+      OCR_PADDLE_LANGUAGE: "${OCR_PADDLE_LANGUAGE:-en}"
+      OCR_TESSERACT_LANGUAGE: "${OCR_TESSERACT_LANGUAGE:-eng}"
+      OCR_AGREE_THRESHOLD: "${OCR_AGREE_THRESHOLD:-0.92}"
+      OCR_CLASSICAL_PAIR_AGREE: "${OCR_CLASSICAL_PAIR_AGREE:-0.90}"
+      OCR_CLASSICAL_PAIR_HARD: "${OCR_CLASSICAL_PAIR_HARD:-0.75}"
+      OCR_ENTROPY_ACCEPT_MAX: "${OCR_ENTROPY_ACCEPT_MAX:-0.25}"
+      OCR_ENTROPY_REVIEW_FLOOR: "${OCR_ENTROPY_REVIEW_FLOOR:-0.60}"
+      OCR_AUDIT_DATA_DIR: /audit-data
+      OCR_AUDIT_RETENTION_DAYS: "${OCR_AUDIT_RETENTION_DAYS:-90}"
+      OCR_AUDIT_DB_HOST: postgres
+      OCR_AUDIT_DB_NAME: "${POSTGRES_DB:-inference}"
+      OCR_AUDIT_DB_USER: "${POSTGRES_USER:-inference}"
+      OCR_AUDIT_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      SURYA_CLIENT_URL: http://surya-client:8091/ocr
+    volumes:
+      - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
+      - ocr_cache:/model-cache
+      - ocr_audit_data:/audit-data
+    secrets: [postgres_password]
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:?run scripts/generate-secrets.sh to set RENDER_GID}"
+      - "${VIDEO_GID:?run scripts/generate-secrets.sh to set VIDEO_GID}"
+    security_opt: [seccomp:unconfined]
+    ipc: host
+    ulimits:
+      memlock: -1
+    mem_limit: "${OCR_ENSEMBLE_MEMORY_LIMIT_GIB:-6}g"
+    networks: [inference]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=10)\""]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 10m
+
+  # Summary: Compatibility-isolated Surya SDK client that translates ensemble page requests into Surya's remote VLM protocol.
+  # Notes: This exists because the SDK requires Pillow <11 and MinerU requires Pillow >=11; it does not hold the Surya VLM weights.
+  surya-client:
+    image: strix-halo/surya-client:local
+    build:
+      context: .
+      dockerfile: docker/surya-client/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      surya:
+        condition: service_healthy
+    environment:
+      SURYA_INFERENCE_URL: http://surya:8080/v1
+      SURYA_INFERENCE_AUTOSTART: "false"
+      SURYA_TORCH_DEVICE: "${OCR_DEVICE:-cpu}"
+      SURYA_MODEL_CACHE_DIR: /model-cache/surya
+    volumes:
+      - ocr_cache:/model-cache
+    mem_limit: "${OCR_SURYA_CLIENT_MEMORY_LIMIT_GIB:-2}g"
+    networks: [inference]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Summary: Surya 2 VLM worker using the existing Vulkan llama.cpp build; only the isolated Surya SDK client calls it on the internal network.
+  # Notes: The 4 GiB worker plus 6 GiB ensemble and 2 GiB SDK-client caps retain the chosen 12 GiB total OCR budget. Do not raise --parallel without a fresh memory benchmark.
+  surya:
+    image: strix-halo/llama-swap-halogen:local
+    build:
+      context: .
+      dockerfile: docker/llama-swap-halogen/Dockerfile
+    restart: unless-stopped
+    entrypoint: [llama-server]
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --model
+      - /models/surya/surya-2.gguf
+      - --mmproj
+      - /models/surya/surya-2-mmproj.gguf
+      - --n-gpu-layers
+      - "999"
+      - --ctx-size
+      - "16384"
+      - --parallel
+      - "1"
+    volumes:
+      - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:?run scripts/generate-secrets.sh to set RENDER_GID}"
+      - "${VIDEO_GID:?run scripts/generate-secrets.sh to set VIDEO_GID}"
+    security_opt: [seccomp:unconfined]
+    ipc: host
+    ulimits:
+      memlock: -1
+    mem_limit: "${OCR_SURYA_MEMORY_LIMIT_GIB:-4}g"
+    networks: [inference]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 3m
+
+  # Summary: Durable PostgreSQL ledger for OCR audits and optional RAG metadata; it does not participate in model routing.
   postgres:
     image: pgvector/pgvector:0.8.6-pg17-bookworm
-    profiles: [rag]
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-inference}
@@ -74,6 +210,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./config/postgres/init/001-enable-pgvector.sql:/docker-entrypoint-initdb.d/001-enable-pgvector.sql:ro
+      - ./config/postgres/init/002-ocr-audit-history.sql:/docker-entrypoint-initdb.d/002-ocr-audit-history.sql:ro
     networks: [inference]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
@@ -89,6 +226,8 @@ networks:
 volumes:
   caddy_data: {}
   caddy_config: {}
+  ocr_cache: {}
+  ocr_audit_data: {}
   postgres_data: {}
 
 secrets:

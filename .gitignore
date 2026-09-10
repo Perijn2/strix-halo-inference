@@ -6,3 +6,5 @@
 secrets/
 models/
 *.log
+__pycache__/
+*.pyc

@@ -1,6 +1,6 @@
 # Author: Perijn
-# Summary: Forwards the public inference API to llama-swap without application-level authentication.
-# Usage: Restrict network access with a host firewall or private network before exposing this listener.
+# Summary: Serves the same-origin OCR playground and forwards every other public inference request to llama-swap without application-level authentication.
+# Usage: Open /ocr-playground/ for the OCR UI; restrict network access with a host firewall or private network before exposing this listener.
 {
 	default_sni {$CADDY_SITE:localhost}
 	fallback_sni {$CADDY_SITE:localhost}
@@ -18,8 +18,22 @@
 		max_size 32MB
 	}
 
-	reverse_proxy llama-swap:8080 {
-		flush_interval -1
-		health_uri /health
+	# The static OCR playground stays same-origin with the inference API, so it
+	# needs no separate CORS or authentication policy. Its audit calls still pass
+	# through llama-swap's stable ocr-ensemble upstream route.
+	handle /ocr-playground {
+		redir /ocr-playground/ permanent
+	}
+
+	handle_path /ocr-playground/* {
+		root * /srv/ocr-playground
+		file_server
+	}
+
+	handle {
+		reverse_proxy llama-swap:8080 {
+			flush_interval -1
+			health_uri /health
+		}
 	}
 }

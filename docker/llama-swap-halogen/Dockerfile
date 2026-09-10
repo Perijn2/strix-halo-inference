@@ -37,8 +37,10 @@ RUN git clone https://github.com/LaurentZuijdwijk/llama.cpp.git /src \
 
 FROM ghcr.io/peonist-ai/halogen-flash-server:0.4.4
 
+# socat is the supervised local forwarder for the separate OCR sidecar. It lets
+# llama-swap own the role/ocr lifecycle without putting Python ML runtimes in this image.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends libgomp1 libvulkan1 \
+    && apt-get install --yes --no-install-recommends libgomp1 libvulkan1 socat \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=llama_swap_build /out/llama-swap /usr/local/bin/llama-swap
 COPY --from=llama_cpp_build /src/build/bin/ /usr/local/bin/
