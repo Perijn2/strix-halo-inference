@@ -20,5 +20,5 @@ test -x "$ornith_model_dir/installed-runtime/venv/bin/python" || {
   exit 1
 }
 
-docker compose --profile rag config >/dev/null
+docker compose config -q
 printf '%s\n' 'Compose configuration is valid.'
