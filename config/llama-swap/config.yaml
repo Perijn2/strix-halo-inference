@@ -10,7 +10,7 @@ hooks:
   on_startup:
     preload:
       - qwen3.8-flash-next
-      - ornith-1.5-35b-a3b
+      - ciru-ornith-1.5-halo-agent
       - qwen3-embedding-4b
       - bge-reranker-v2-m3
 
@@ -21,7 +21,7 @@ routing:
       matrix:
         vars:
           q: qwen3.8-flash-next
-          o: ornith-1.5-35b-a3b
+          o: ciru-ornith-1.5-halo-agent
           e: qwen3-embedding-4b
           r: bge-reranker-v2-m3
           x: ocr-ensemble
@@ -91,27 +91,31 @@ models:
           presence_penalty: 1.5
           repetition_penalty: 1.0
 
-  ornith-1.5-35b-a3b:
-    name: Ornith 1.5 35B A3B
-    description: Reasoning model for implementation, testing, and documentation.
+  ciru-ornith-1.5-halo-agent:
+    name: Ornith 1.5 Ciru Halo Agent
+    description: Ciru's Strix-Halo-specific packed Ornith runtime for implementation, testing, and documentation.
+    # This checkpoint is incompatible with llama.cpp and stock vLLM. The mounted
+    # release includes its pinned runtime, custom kernels, DFlash2 drafter, and
+    # launcher; preserve its supplied serving profile.
     cmd: |
-      llama-server
-      --host 127.0.0.1 --port ${PORT}
-      --model /models/ornith/Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf
-      --alias ornith-1.5-35b-a3b
-      --jinja --flash-attn on --n-gpu-layers 999
-      --ctx-size 65536 --parallel 2
-    env:
-      - "GGML_VK_DENSE_WAVE32=1"
+      # Override the release defaults: reserve 131K tokens for each session and
+      # admit at most six concurrent agent sessions during initial deployment.
+      bash /ornith/bundle/serve.sh --host 127.0.0.1 --port ${PORT} \
+        --context 131072 --max-seqs 6
     checkEndpoint: /health
     ttl: 0
+    aliases: [ornith-1.5-35b-a3b]
     capabilities:
       in: [text]
       out: [text]
       tools: true
-      context: 65536
+      context: 131072
     metadata:
       reasoning: true
+      runtime: ciru-vllm-rocm
+      served_model: ciru-halo-agent
+      max_sequences: 6
+      shared_kv_state_pool_gib: 44
     filters:
       setParams:
         enable_thinking?: true
