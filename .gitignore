@@ -1,0 +1,8 @@
+# Author: Perijn
+# Summary: Prevents host-specific configuration, secrets, and downloaded model artifacts from entering version control.
+# Usage: Keep deployment paths in .env, database passwords outside the repository, and model artifacts under the configured external model directory.
+.env
+*.env.local
+secrets/
+models/
+*.log

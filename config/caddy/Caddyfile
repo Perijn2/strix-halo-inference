@@ -1,0 +1,25 @@
+# Author: Perijn
+# Summary: Forwards the public inference API to llama-swap without application-level authentication.
+# Usage: Restrict network access with a host firewall or private network before exposing this listener.
+{
+	default_sni {$CADDY_SITE:localhost}
+	fallback_sni {$CADDY_SITE:localhost}
+}
+
+{$CADDY_SITE:localhost} {
+	tls internal
+
+	log {
+		output stdout
+		format console
+	}
+
+	request_body {
+		max_size 32MB
+	}
+
+	reverse_proxy llama-swap:8080 {
+		flush_interval -1
+		health_uri /health
+	}
+}

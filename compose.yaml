@@ -1,0 +1,96 @@
+# Author: Perijn
+# Summary: Runs the Strix Halo inference gateway, permanent Qwen service, and optional RAG database.
+# Usage: Copy .env.example to .env, configure model directories and host group IDs, then run `docker compose up -d`.
+# The default topology keeps Qwen, embedding, and reranking available; add `--profile rag` for PostgreSQL.
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${CADDY_HTTP_PORT:-8080}:80"
+      - "${CADDY_HTTPS_PORT:-8443}:443"
+    environment:
+      CADDY_SITE: ${CADDY_SITE:-localhost}
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      llama-swap:
+        condition: service_healthy
+    networks: [edge, inference]
+
+  llama-swap:
+    image: strix-halo/llama-swap-halogen:local
+    build:
+      context: .
+      dockerfile: docker/llama-swap-halogen/Dockerfile
+    restart: unless-stopped
+    command:
+      - -config
+      - /etc/llama-swap/config/config.yaml
+      - -listen
+      - 0.0.0.0:8080
+      - -watch-config
+    environment:
+      HALOGEN_MODEL_ID: qwen3.8-flash-next
+      HALOGEN_CHECKPOINT: /halogen-models/qwen38-flash-next-w4b.hgn
+      HALOGEN_KV_SLOTS: "2"
+      HALOGEN_CTX: "131072"
+      HALOGEN_KV_POOL_POSITIONS: "262144"
+      HALOGEN_HOST_RESERVE_GIB: "${HALOGEN_HOST_RESERVE_GIB:-28}"
+      HALOGEN_PROMPT_CACHE: "2"
+    volumes:
+      - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
+      - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
+      - ${HALOGEN_MODELS_DIR:?set HALOGEN_MODELS_DIR in .env}:/halogen-models:ro
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:?run scripts/generate-secrets.sh to set RENDER_GID}"
+      - "${VIDEO_GID:?run scripts/generate-secrets.sh to set VIDEO_GID}"
+    security_opt: [seccomp:unconfined]
+    ipc: host
+    ulimits:
+      memlock: -1
+    networks: [inference]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg17-bookworm
+    profiles: [rag]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-inference}
+      POSTGRES_USER: ${POSTGRES_USER:-inference}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./config/postgres/init/001-enable-pgvector.sql:/docker-entrypoint-initdb.d/001-enable-pgvector.sql:ro
+    networks: [inference]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  edge: {}
+  inference:
+    internal: true
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
+  postgres_data: {}
+
+secrets:
+  postgres_password:
+    file: ${POSTGRES_PASSWORD_FILE:?set POSTGRES_PASSWORD_FILE in .env}

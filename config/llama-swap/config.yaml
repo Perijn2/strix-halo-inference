@@ -1,0 +1,121 @@
+# Author: Perijn
+# Summary: Makes llama-swap the lifecycle manager and sole router for Qwen, Ornith, embedding, and reranking models.
+# Usage: Caddy sends every API request here. llama-swap loads a model on its first request and its UI/API can unload it explicitly.
+# The orchestration profile maps Qwen roles to request-only thinking variants without reloading its Halogen process.
+apiKeys: []
+
+globalTTL: 0
+unloadTimeout: 60
+
+hooks:
+  on_startup:
+    profile: orchestration
+    preload: [qwen3-embedding-4b, bge-reranker-v2-m3]
+
+routing:
+  router:
+    use: matrix
+    settings:
+      matrix:
+        vars:
+          q: qwen3.8-flash-next
+          o: ornith-1.5-35b-a3b
+          e: qwen3-embedding-4b
+          r: bge-reranker-v2-m3
+        evict_costs:
+          q: 100
+          o: 20
+        sets:
+          qwen-rag: "q & e & r"
+          ornith-rag: "o & e & r"
+
+models:
+  qwen3.8-flash-next:
+    name: Qwen3.8 Flash Next
+    description: Halogen-managed orchestrator, architect, planner, and reviewer model.
+    cmd: |
+      HALOGEN_API_PORT=${PORT} halogen-launch all
+    checkEndpoint: /health
+    ttl: 0
+    filters:
+      setParamsByID:
+        "${MODEL_ID}:think":
+          enable_thinking: true
+          reasoning_effort: high
+        "${MODEL_ID}:fast":
+          enable_thinking: false
+          reasoning_effort: low
+
+  ornith-1.5-35b-a3b:
+    name: Ornith 1.5 35B A3B
+    description: Implementation, testing, and documentation model.
+    cmd: |
+      llama-server
+      --host 127.0.0.1 --port ${PORT}
+      --model /models/ornith/Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf
+      --alias ornith-1.5-35b-a3b
+      --jinja --flash-attn on --n-gpu-layers 999
+      --ctx-size 65536 --parallel 2
+    env:
+      - "GGML_VK_DENSE_WAVE32=1"
+    checkEndpoint: /health
+    ttl: 0
+    filters:
+      setParamsByID:
+        "${MODEL_ID}:think":
+          enable_thinking: true
+        "${MODEL_ID}:fast":
+          enable_thinking: false
+
+  qwen3-embedding-4b:
+    name: Qwen3 Embedding 4B
+    description: Persistent high-quality retrieval embedding model.
+    cmd: |
+      llama-server
+      --host 127.0.0.1 --port ${PORT}
+      --model /models/qwen3-embedding/Qwen3-Embedding-4B-Q6_K.gguf
+      --alias qwen3-embedding-4b
+      --embedding --pooling mean --n-gpu-layers 999
+      --ctx-size 8192 --batch-size 2048 --ubatch-size 512
+    checkEndpoint: /health
+    ttl: 0
+
+  bge-reranker-v2-m3:
+    name: BGE Reranker v2 M3
+    description: Persistent multilingual cross-encoder reranker.
+    cmd: |
+      llama-server
+      --host 127.0.0.1 --port ${PORT}
+      --model /models/bge-reranker/bge-reranker-v2-m3-Q8_0.gguf
+      --alias bge-reranker-v2-m3
+      --reranking --n-gpu-layers 999
+      --ctx-size 8192
+    checkEndpoint: /health
+    ttl: 0
+
+profiles:
+  orchestration:
+    description: Qwen plans, reviews, and orchestrates while retrieval remains available.
+    pins:
+      role/orchestrator: qwen3.8-flash-next:think
+      role/architect: qwen3.8-flash-next:think
+      role/reviewer: qwen3.8-flash-next:think
+      role/general: qwen3.8-flash-next:fast
+      role/embed: qwen3-embedding-4b
+      role/rerank: bge-reranker-v2-m3
+      role/implementer: ~
+      role/tester: ~
+      role/documenter: ~
+
+  engineering:
+    description: Ornith implements, tests, and documents while retrieval remains available.
+    pins:
+      role/orchestrator: ~
+      role/architect: ~
+      role/reviewer: ~
+      role/general: ornith-1.5-35b-a3b:fast
+      role/implementer: ornith-1.5-35b-a3b:think
+      role/tester: ornith-1.5-35b-a3b:think
+      role/documenter: ornith-1.5-35b-a3b:fast
+      role/embed: qwen3-embedding-4b
+      role/rerank: bge-reranker-v2-m3
