@@ -113,7 +113,9 @@ def _decode_base64(payload: str, label: str) -> bytes:
     try:
         return base64.b64decode(payload, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=f"{label} is not valid base64") from exc
+        raise HTTPException(
+            status_code=422, detail=f"{label} is not valid base64"
+        ) from exc
 
 
 def _decode_image(payload: str) -> Any:
@@ -125,7 +127,9 @@ def _decode_image(payload: str) -> Any:
         image = Image.open(io.BytesIO(data))
         image.load()
     except Exception as exc:  # noqa: BLE001 - malformed caller data is a 422.
-        raise HTTPException(status_code=422, detail=f"image_b64 is not a decodable image: {exc}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"image_b64 is not a decodable image: {exc}"
+        ) from exc
     return image.convert("RGB")
 
 
@@ -138,7 +142,9 @@ def _render_document(source: bytes, media_type: str, filename: str) -> list[byte
         try:
             image = Image.open(io.BytesIO(source)).convert("RGB")
         except Exception as exc:  # noqa: BLE001 - malformed caller data is a 422.
-            raise HTTPException(status_code=422, detail=f"source image cannot be decoded: {exc}") from exc
+            raise HTTPException(
+                status_code=422, detail=f"source image cannot be decoded: {exc}"
+            ) from exc
         return [_png_bytes(image)]
 
     try:
@@ -148,9 +154,13 @@ def _render_document(source: bytes, media_type: str, filename: str) -> list[byte
         pages = []
         # 192 DPI preserves small print without exploding CPU RAM on long PDFs.
         for page in document:
-            pages.append(_png_bytes(page.render(scale=192 / 72).to_pil().convert("RGB")))
+            pages.append(
+                _png_bytes(page.render(scale=192 / 72).to_pil().convert("RGB"))
+            )
     except Exception as exc:  # noqa: BLE001 - external PDF parser boundary.
-        raise HTTPException(status_code=422, detail=f"PDF rendering failed: {exc}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"PDF rendering failed: {exc}"
+        ) from exc
     if not pages:
         raise HTTPException(status_code=422, detail="PDF contains no renderable pages")
     return pages
@@ -266,20 +276,23 @@ def submit_document(request: DocumentRequest) -> DocumentResponse:
     """Render, audit, and persist every page of an uploaded image or PDF for 90 days."""
     source = _decode_base64(request.document_b64, "document_b64")
     pages = _render_document(source, request.media_type, request.filename)
-    document_id, paths = _STORE.save_document(
+    document_id = _STORE.new_document_id()
+    audits: list[OcrResponse] = []
+    from PIL import Image
+
+    # Audit every page before retaining any artifact. This keeps an engine failure
+    # from creating a history record that advertises pages without their audits.
+    for page_number, page in enumerate(pages, start=1):
+        image = Image.open(io.BytesIO(page)).convert("RGB")
+        audits.append(_audit_page(image, f"{document_id}:{page_number}"))
+    _STORE.save_document_with_audits(
+        document_id=document_id,
         filename=Path(request.filename).name,
         media_type=request.media_type,
         source=source,
         pages=pages,
+        audits=[audit.model_dump(mode="json") for audit in audits],
     )
-    audits: list[OcrResponse] = []
-    from PIL import Image
-
-    for page_number, path in enumerate(paths, start=1):
-        image = Image.open(path).convert("RGB")
-        audit = _audit_page(image, f"{document_id}:{page_number}")
-        _STORE.save_page_audit(document_id, page_number, audit.model_dump(mode="json"))
-        audits.append(audit)
     document = _STORE.get_document(document_id)
     assert document is not None  # The preceding insert is transactional and required.
     return DocumentResponse(
@@ -312,7 +325,9 @@ def page_image(document_id: UUID, page_number: int) -> FileResponse:
     """Serve one retained rendered page for client-side bounding-box overlays."""
     path = _STORE.get_page_path(document_id, page_number)
     if path is None:
-        raise HTTPException(status_code=404, detail="rendered page not found or expired")
+        raise HTTPException(
+            status_code=404, detail="rendered page not found or expired"
+        )
     return FileResponse(path, media_type="image/png")
 
 
@@ -328,8 +343,18 @@ def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": "ocr-ensemble",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": audit.text}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 0, "completion_tokens": len(audit.text), "total_tokens": len(audit.text)},
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": audit.text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": len(audit.text),
+            "total_tokens": len(audit.text),
+        },
     }
 
 

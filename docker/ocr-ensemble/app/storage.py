@@ -51,7 +51,9 @@ class AuditStore:
         self.database = os.environ.get("OCR_AUDIT_DB_NAME", "inference")
         self.user = os.environ.get("OCR_AUDIT_DB_USER", "inference")
         self.password_file = Path(
-            os.environ.get("OCR_AUDIT_DB_PASSWORD_FILE", "/run/secrets/postgres_password")
+            os.environ.get(
+                "OCR_AUDIT_DB_PASSWORD_FILE", "/run/secrets/postgres_password"
+            )
         )
 
     def initialize(self) -> None:
@@ -61,70 +63,112 @@ class AuditStore:
             cursor.execute(_SCHEMA)
         self.cleanup_expired()
 
-    def save_document(
-        self, *, filename: str, media_type: str, source: bytes, pages: list[bytes]
-    ) -> tuple[UUID, list[Path]]:
-        """Persist one source document and its rendered page PNGs.
+    def new_document_id(self) -> UUID:
+        """Return an identifier that can correlate page audits before persistence."""
+        return uuid4()
+
+    def save_document_with_audits(
+        self,
+        *,
+        document_id: UUID,
+        filename: str,
+        media_type: str,
+        source: bytes,
+        pages: list[bytes],
+        audits: list[dict[str, Any]],
+    ) -> None:
+        """Persist one fully audited document and its artifacts atomically.
+
+        The database transaction writes the document and every page audit together.
+        Filesystem artifacts are removed if either their creation or the database
+        transaction fails, so incomplete documents cannot appear in history.
 
         Args:
+            document_id: Preallocated identifier included in page audit references.
             filename: Original caller-provided file name.
             media_type: Declared source media type.
             source: Original document/image bytes.
             pages: Rendered PNG bytes in page order.
+            audits: JSON-serializable audit payloads in the same order as ``pages``.
 
-        Returns:
-            New document UUID and absolute rendered-page paths.
+        Raises:
+            ValueError: If the page and audit counts differ.
         """
+        if len(pages) != len(audits):
+            raise ValueError("each rendered page must have exactly one audit")
         self.cleanup_expired()
-        document_id = uuid4()
         directory = self.root / str(document_id)
-        directory.mkdir(parents=True, exist_ok=False)
-        source_path = directory / "source"
-        source_path.write_bytes(source)
-        page_paths = []
-        for number, page in enumerate(pages, start=1):
-            path = directory / f"page-{number:04d}.png"
-            path.write_bytes(page)
-            page_paths.append(path)
-        expires_at = datetime.now(UTC) + timedelta(days=self.retention_days)
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """INSERT INTO ocr_documents
-                   (id, filename, media_type, source_path, page_count, expires_at)
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
-                (document_id, filename, media_type, str(source_path), len(page_paths), expires_at),
-            )
-        return document_id, page_paths
-
-    def save_page_audit(self, document_id: UUID, page_number: int, audit: dict[str, Any]) -> None:
-        """Persist one page's complete, JSON-serializable audit record."""
-        page_path = self.root / str(document_id) / f"page-{page_number:04d}.png"
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """INSERT INTO ocr_pages (id, document_id, page_number, image_path, audit)
-                   VALUES (%s, %s, %s, %s, %s)
-                   ON CONFLICT (document_id, page_number)
-                   DO UPDATE SET audit = EXCLUDED.audit, image_path = EXCLUDED.image_path""",
-                (uuid4(), document_id, page_number, str(page_path), json.dumps(audit)),
-            )
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+            source_path = directory / "source"
+            source_path.write_bytes(source)
+            page_paths = []
+            for number, page in enumerate(pages, start=1):
+                path = directory / f"page-{number:04d}.png"
+                path.write_bytes(page)
+                page_paths.append(path)
+            expires_at = datetime.now(UTC) + timedelta(days=self.retention_days)
+            with self._connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO ocr_documents
+                       (id, filename, media_type, source_path, page_count, expires_at)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (
+                        document_id,
+                        filename,
+                        media_type,
+                        str(source_path),
+                        len(page_paths),
+                        expires_at,
+                    ),
+                )
+                for page_number, (page_path, audit) in enumerate(
+                    zip(page_paths, audits, strict=True), start=1
+                ):
+                    cursor.execute(
+                        """INSERT INTO ocr_pages (id, document_id, page_number, image_path, audit)
+                           VALUES (%s, %s, %s, %s, %s)""",
+                        (
+                            uuid4(),
+                            document_id,
+                            page_number,
+                            str(page_path),
+                            json.dumps(audit),
+                        ),
+                    )
+        except Exception:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
 
     def list_documents(self, limit: int = 100) -> list[dict[str, Any]]:
-        """Return recent document summaries in newest-first order."""
-        with self._connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        """Return recent, unexpired document summaries in newest-first order."""
+        self.cleanup_expired()
+        with (
+            self._connect() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
             cursor.execute(
                 """SELECT d.id, d.filename, d.media_type, d.page_count, d.created_at, d.expires_at,
                           count(p.id) AS audited_pages,
                           bool_or((p.audit->>'review')::boolean) AS needs_review
                    FROM ocr_documents d LEFT JOIN ocr_pages p ON p.document_id = d.id
+                   WHERE d.expires_at > now()
                    GROUP BY d.id ORDER BY d.created_at DESC LIMIT %s""",
                 (limit,),
             )
             return list(cursor.fetchall())
 
     def get_document(self, document_id: UUID) -> dict[str, Any] | None:
-        """Return one document and ordered page audit records, when retained."""
-        with self._connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute("SELECT * FROM ocr_documents WHERE id = %s", (document_id,))
+        """Return one unexpired document and its ordered page audit records."""
+        self.cleanup_expired()
+        with (
+            self._connect() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                "SELECT * FROM ocr_documents WHERE id = %s AND expires_at > now()",
+                (document_id,),
+            )
             document = cursor.fetchone()
             if document is None:
                 return None
@@ -136,14 +180,27 @@ class AuditStore:
             return document
 
     def get_page_path(self, document_id: UUID, page_number: int) -> Path | None:
-        """Return a retained rendered-page path only when its document still exists."""
+        """Return a rendered-page path only while its document is retained."""
+        self.cleanup_expired()
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM ocr_documents WHERE id = %s AND expires_at > now()",
+                (document_id,),
+            )
+            if cursor.fetchone() is None:
+                return None
         path = self.root / str(document_id) / f"page-{page_number:04d}.png"
         return path if path.is_file() else None
 
     def cleanup_expired(self) -> int:
         """Delete expired ledger rows and their private artifact directories."""
-        with self._connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute("DELETE FROM ocr_documents WHERE expires_at <= now() RETURNING id")
+        with (
+            self._connect() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                "DELETE FROM ocr_documents WHERE expires_at <= now() RETURNING id"
+            )
             expired = list(cursor.fetchall())
         for row in expired:
             shutil.rmtree(self.root / str(row["id"]), ignore_errors=True)
