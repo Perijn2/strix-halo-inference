@@ -52,15 +52,22 @@ app = FastAPI(
 class OcrRequest(BaseModel):
     """One rendered page submitted for a transient full audit."""
 
-    image_b64: str = Field(..., description="Base64-encoded PNG, JPEG, or WebP page image.")
+    image_b64: str = Field(
+        ..., description="Base64-encoded PNG, JPEG, or WebP page image."
+    )
     page_ref: str | None = Field(None, description="Caller correlation id.")
-    engines: list[str] | None = Field(None, description="Optional engine subset.")
+    engines: list[str] | None = Field(
+        None,
+        description="Optional diagnostic engine subset; subset results always require review.",
+    )
 
 
 class DocumentRequest(BaseModel):
     """One image or PDF source document submitted for durable review."""
 
-    document_b64: str = Field(..., description="Base64-encoded image or PDF source document.")
+    document_b64: str = Field(
+        ..., description="Base64-encoded image or PDF source document."
+    )
     filename: str = Field(..., min_length=1, max_length=255)
     media_type: str = Field("application/pdf", max_length=127)
 
@@ -106,7 +113,9 @@ def _decode_base64(payload: str, label: str) -> bytes:
     try:
         return base64.b64decode(payload, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=f"{label} is not valid base64") from exc
+        raise HTTPException(
+            status_code=422, detail=f"{label} is not valid base64"
+        ) from exc
 
 
 def _decode_image(payload: str) -> Any:
@@ -118,7 +127,9 @@ def _decode_image(payload: str) -> Any:
         image = Image.open(io.BytesIO(data))
         image.load()
     except Exception as exc:  # noqa: BLE001 - malformed caller data is a 422.
-        raise HTTPException(status_code=422, detail=f"image_b64 is not a decodable image: {exc}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"image_b64 is not a decodable image: {exc}"
+        ) from exc
     return image.convert("RGB")
 
 
@@ -131,7 +142,9 @@ def _render_document(source: bytes, media_type: str, filename: str) -> list[byte
         try:
             image = Image.open(io.BytesIO(source)).convert("RGB")
         except Exception as exc:  # noqa: BLE001 - malformed caller data is a 422.
-            raise HTTPException(status_code=422, detail=f"source image cannot be decoded: {exc}") from exc
+            raise HTTPException(
+                status_code=422, detail=f"source image cannot be decoded: {exc}"
+            ) from exc
         return [_png_bytes(image)]
 
     try:
@@ -141,9 +154,13 @@ def _render_document(source: bytes, media_type: str, filename: str) -> list[byte
         pages = []
         # 192 DPI preserves small print without exploding CPU RAM on long PDFs.
         for page in document:
-            pages.append(_png_bytes(page.render(scale=192 / 72).to_pil().convert("RGB")))
+            pages.append(
+                _png_bytes(page.render(scale=192 / 72).to_pil().convert("RGB"))
+            )
     except Exception as exc:  # noqa: BLE001 - external PDF parser boundary.
-        raise HTTPException(status_code=422, detail=f"PDF rendering failed: {exc}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"PDF rendering failed: {exc}"
+        ) from exc
     if not pages:
         raise HTTPException(status_code=422, detail="PDF contains no renderable pages")
     return pages
@@ -167,15 +184,24 @@ def _select_engines(names: list[str] | None) -> list[Any]:
     return [by_name[name] for name in names]
 
 
-def _run_ensemble(image: Any, names: list[str] | None) -> tuple[FusionResult, list[EngineResult]]:
-    """Run selected engines serially under the configured memory boundary."""
+def _run_ensemble(
+    image: Any, names: list[str] | None
+) -> tuple[FusionResult, list[EngineResult]]:
+    """Run selected engines serially under the configured memory boundary.
+
+    A caller-selected subset is useful for diagnostic comparisons, but it cannot
+    yield a four-engine validated acceptance verdict.
+    """
     with _run_lock:
         results = [engine.recognize(image) for engine in _select_engines(names)]
-    return _FUSION.fuse(results), results
+    return _FUSION.fuse(results, allow_auto_accept=names is None), results
 
 
 def _response_from_results(
-    fused: FusionResult, results: list[EngineResult], page_ref: str | None, elapsed_ms: int
+    fused: FusionResult,
+    results: list[EngineResult],
+    page_ref: str | None,
+    elapsed_ms: int,
 ) -> OcrResponse:
     """Convert fusion and engine results into a JSON-safe public audit record."""
     outputs = {
@@ -203,10 +229,12 @@ def _response_from_results(
     )
 
 
-def _audit_page(image: Any, page_ref: str | None = None) -> OcrResponse:
-    """Run one page through the ensemble and retain every engine output in memory."""
+def _audit_page(
+    image: Any, page_ref: str | None = None, names: list[str] | None = None
+) -> OcrResponse:
+    """Run one page through the requested ensemble and retain its audit in memory."""
     started = time.monotonic()
-    fused, results = _run_ensemble(image, None)
+    fused, results = _run_ensemble(image, names)
     return _response_from_results(
         fused, results, page_ref, int((time.monotonic() - started) * 1000)
     )
@@ -227,13 +255,20 @@ def health(response: Response) -> dict[str, Any]:
     ready = len(live) == len(_ENGINES)
     if not ready:
         response.status_code = 503
-    return {"status": "ok" if ready else "degraded", "live_engines": live, "engines": status, "thresholds": _CONFIG.__dict__}
+    return {
+        "status": "ok" if ready else "degraded",
+        "live_engines": live,
+        "engines": status,
+        "thresholds": _CONFIG.__dict__,
+    }
 
 
 @app.post("/ocr", response_model=OcrResponse)
 def ocr(request: OcrRequest) -> OcrResponse:
     """Run a transient, single-page audit without retaining source data."""
-    return _audit_page(_decode_image(request.image_b64), request.page_ref)
+    return _audit_page(
+        _decode_image(request.image_b64), request.page_ref, request.engines
+    )
 
 
 @app.post("/documents", response_model=DocumentResponse)
@@ -241,20 +276,23 @@ def submit_document(request: DocumentRequest) -> DocumentResponse:
     """Render, audit, and persist every page of an uploaded image or PDF for 90 days."""
     source = _decode_base64(request.document_b64, "document_b64")
     pages = _render_document(source, request.media_type, request.filename)
-    document_id, paths = _STORE.save_document(
+    document_id = _STORE.new_document_id()
+    audits: list[OcrResponse] = []
+    from PIL import Image
+
+    # Audit every page before retaining any artifact. This keeps an engine failure
+    # from creating a history record that advertises pages without their audits.
+    for page_number, page in enumerate(pages, start=1):
+        image = Image.open(io.BytesIO(page)).convert("RGB")
+        audits.append(_audit_page(image, f"{document_id}:{page_number}"))
+    _STORE.save_document_with_audits(
+        document_id=document_id,
         filename=Path(request.filename).name,
         media_type=request.media_type,
         source=source,
         pages=pages,
+        audits=[audit.model_dump(mode="json") for audit in audits],
     )
-    audits: list[OcrResponse] = []
-    from PIL import Image
-
-    for page_number, path in enumerate(paths, start=1):
-        image = Image.open(path).convert("RGB")
-        audit = _audit_page(image, f"{document_id}:{page_number}")
-        _STORE.save_page_audit(document_id, page_number, audit.model_dump(mode="json"))
-        audits.append(audit)
     document = _STORE.get_document(document_id)
     assert document is not None  # The preceding insert is transactional and required.
     return DocumentResponse(
@@ -287,7 +325,9 @@ def page_image(document_id: UUID, page_number: int) -> FileResponse:
     """Serve one retained rendered page for client-side bounding-box overlays."""
     path = _STORE.get_page_path(document_id, page_number)
     if path is None:
-        raise HTTPException(status_code=404, detail="rendered page not found or expired")
+        raise HTTPException(
+            status_code=404, detail="rendered page not found or expired"
+        )
     return FileResponse(path, media_type="image/png")
 
 
@@ -303,8 +343,18 @@ def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": "ocr-ensemble",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": audit.text}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 0, "completion_tokens": len(audit.text), "total_tokens": len(audit.text)},
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": audit.text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": len(audit.text),
+            "total_tokens": len(audit.text),
+        },
     }
 
 

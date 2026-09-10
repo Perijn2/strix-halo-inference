@@ -124,11 +124,15 @@ class FusionEngine:
         self.config = config or FusionConfig()
         self._consensus = _load_consensus_entropy()
 
-    def fuse(self, results: list[EngineResult]) -> FusionResult:
+    def fuse(
+        self, results: list[EngineResult], *, allow_auto_accept: bool = True
+    ) -> FusionResult:
         """Fuse per-engine results into one verdict.
 
         Args:
             results: Every engine result for the page, including failures.
+            allow_auto_accept: Whether this request ran the complete validation
+                ensemble. Diagnostic subsets always return a review verdict.
 
         Returns:
             The verdict, with the audit trail needed to act on it.
@@ -173,6 +177,11 @@ class FusionEngine:
             if mineru and classical
             else None
         )
+        mineru_best_classical = (
+            max(similarity(mineru.text, c.text) for c in classical)
+            if mineru and classical
+            else None
+        )
 
         selected_ungrounded = _ungrounded_numbers(selected, classical)
         mineru_ungrounded = (
@@ -192,7 +201,15 @@ class FusionEngine:
         # has negligible whole-page edit distance, so pairwise similarity alone
         # cannot safely detect this failure mode. When the classical pair itself
         # disagrees, preserve the R1 hard-page verdict: neither is a trusted witness.
-        if ungrounded and (
+        if not allow_auto_accept:
+            reasons.append(
+                "partial engine selection cannot produce a validated acceptance"
+            )
+            verdict = REVIEW_ENTROPY
+        elif len(usable) != len(results):
+            reasons.append("one or more validation engines failed or produced no text")
+            verdict = REVIEW_ENTROPY
+        elif ungrounded and (
             classical_pair_sim is None
             or classical_pair_sim >= self.config.classical_pair_agree
         ):
@@ -202,6 +219,7 @@ class FusionEngine:
             verdict = self._decide(
                 classical_pair_sim=classical_pair_sim,
                 mineru_vs_classical=mineru_vs_classical,
+                mineru_best_classical=mineru_best_classical,
                 pairwise=pairwise,
                 entropy=entropy,
                 engine_count=len(usable),
@@ -226,6 +244,7 @@ class FusionEngine:
         *,
         classical_pair_sim: float | None,
         mineru_vs_classical: float | None,
+        mineru_best_classical: float | None,
         pairwise: dict[str, float],
         entropy: float | None,
         engine_count: int,
@@ -236,6 +255,7 @@ class FusionEngine:
         Args:
             classical_pair_sim: Agreement between the two classical engines.
             mineru_vs_classical: MinerU's worst agreement against any classical engine.
+            mineru_best_classical: MinerU's best agreement against a classical engine.
             pairwise: All pairwise engine similarities.
             entropy: Consensus Entropy, or ``None`` when underdetermined.
             engine_count: Engines that produced text.
@@ -250,7 +270,10 @@ class FusionEngine:
         # the other, so nothing downstream is verifiable. This outranks the
         # hallucination rule because a page the classical pair cannot read gives no
         # witness to trust.
-        if classical_pair_sim is not None and classical_pair_sim < cfg.classical_pair_hard:
+        if (
+            classical_pair_sim is not None
+            and classical_pair_sim < cfg.classical_pair_hard
+        ):
             reasons.append(
                 f"classical engines disagree with each other "
                 f"({classical_pair_sim:.3f} < {cfg.classical_pair_hard})"
@@ -284,9 +307,7 @@ class FusionEngine:
         # R4: Unanimous agreement across every live engine, with low entropy.
         if engine_count >= 3 and pairwise and min(pairwise.values()) >= cfg.agree:
             if entropy is None or entropy <= cfg.entropy_accept:
-                reasons.append(
-                    f"all {engine_count} engines agree above {cfg.agree}"
-                )
+                reasons.append(f"all {engine_count} engines agree above {cfg.agree}")
                 return ACCEPT
             reasons.append(
                 f"pairwise agreement but entropy {entropy:.3f} exceeds "
@@ -294,8 +315,8 @@ class FusionEngine:
             )
             return REVIEW_ENTROPY
 
-        # R5: MinerU agrees with at least one other engine.
-        if mineru_vs_classical is not None and mineru_vs_classical >= cfg.agree:
+        # R5: MinerU agrees with at least one classical engine.
+        if mineru_best_classical is not None and mineru_best_classical >= cfg.agree:
             reasons.append("MinerU corroborated by at least one classical engine")
             return ACCEPT_WEIGHTED
 
@@ -338,7 +359,9 @@ class FusionEngine:
             others = [o for o in usable if o is not candidate]
             if not others:
                 continue
-            score = sum(similarity(candidate.text, o.text) for o in others) / len(others)
+            score = sum(similarity(candidate.text, o.text) for o in others) / len(
+                others
+            )
             if score > best_score:
                 best_score = score
                 best = candidate
@@ -348,9 +371,7 @@ class FusionEngine:
         # the classical engines flatten into a single text stream.
         if mineru is not None:
             mineru_score = sum(
-                similarity(mineru.text, o.text)
-                for o in usable
-                if o is not mineru
+                similarity(mineru.text, o.text) for o in usable if o is not mineru
             ) / max(1, len(usable) - 1)
             if mineru_score >= best_score - 1e-9:
                 return mineru
@@ -374,7 +395,9 @@ def _by_name(results: list[EngineResult], name: str) -> EngineResult | None:
     return None
 
 
-def _ungrounded_numbers(selected: EngineResult, classical: list[EngineResult]) -> list[str]:
+def _ungrounded_numbers(
+    selected: EngineResult, classical: list[EngineResult]
+) -> list[str]:
     """Find numeric tokens in the parse that no classical engine saw.
 
     A dosage or identifier present in the VLM output but absent from every
