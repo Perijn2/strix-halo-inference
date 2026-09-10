@@ -35,7 +35,7 @@ RUN git clone https://github.com/LaurentZuijdwijk/llama.cpp.git /src \
     && cmake -S /src -B /src/build -DGGML_VULKAN=ON -DGGML_NATIVE=ON -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /src/build --target llama-server --parallel
 
-FROM ghcr.io/peonist-ai/halogen-flash-server:0.4.4
+FROM ghcr.io/peonist-ai/halogen-flash-server:0.5.6
 
 # socat is the supervised local forwarder for the separate OCR sidecar. It lets
 # llama-swap own the role/ocr lifecycle without putting Python ML runtimes in this image.
@@ -45,7 +45,8 @@ RUN apt-get update \
 COPY --from=llama_swap_build /out/llama-swap /usr/local/bin/llama-swap
 COPY --from=llama_cpp_build /src/build/bin/ /usr/local/bin/
 COPY docker/llama-swap-halogen/scripts/halogen-launch.sh /usr/local/bin/halogen-launch
-RUN chmod 0755 /usr/local/bin/halogen-launch \
+COPY docker/llama-swap-halogen/scripts/halogen-telemetry-proxy.py /usr/local/bin/halogen-telemetry-proxy
+RUN chmod 0755 /usr/local/bin/halogen-launch /usr/local/bin/halogen-telemetry-proxy \
     && printf '%s\n' /usr/local/bin > /etc/ld.so.conf.d/llama-server.conf \
     && ldconfig
 

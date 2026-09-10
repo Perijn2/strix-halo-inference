@@ -22,6 +22,12 @@ Halogen uses two 131K-context slots and a 262K shared KV pool. `HALOGEN_HOST_RES
 
 Qwen has no inactivity-based unload: llama-swap sets its TTL to zero. Halogen’s startup can take minutes because it loads a large checkpoint. llama-swap waits for the model `/health` endpoint before forwarding the first request.
 
+## Halogen PP/TG telemetry
+
+Halogen reports its measured prefill and decode timings in its per-request `serve_api:` log ledger, not in the OpenAI response. `halogen-telemetry-proxy` is launched automatically between llama-swap and Halogen: it parses that ledger and adds llama.cpp-compatible `timings` to completed chat responses. llama-swap then records prompt-processing (PP) and token-generation (TG) speeds in Activity. The proxy preserves streaming and inserts its timing event immediately before the terminal SSE `[DONE]` event.
+
+The timings are the engine's own prefill and decode-window measurements. A missing PP/TG value means that no matching ledger line was available before the proxy's two-second wait; investigate the llama-swap upstream log stream rather than substituting HTTP wall-clock speed. Confirm the adapter after deployment with a non-streaming `role/general` chat request and `GET /api/metrics/activity?model=qwen3.8-flash-next`.
+
 The OCR budget is deliberately separate and strict: `OCR_ENSEMBLE_MEMORY_LIMIT_GIB=6`, `OCR_SURYA_CLIENT_MEMORY_LIMIT_GIB=2`, and `OCR_SURYA_MEMORY_LIMIT_GIB=4` total 12 GiB. The Surya SDK client is separate because it requires Pillow <11 while MinerU requires Pillow >=11. The ensemble starts CPU-first (`OCR_DEVICE=cpu`) because upstream ROCm and PaddlePaddle do not validate `gfx1151`; Surya uses the existing Vulkan llama.cpp image. Do not change any cap, move MinerU to vLLM, or enable a Python GPU device until you measure all resident Qwen, Ornith, embedding, reranker, MinerU, and Surya memory together.
 
 If you later move MinerU to vLLM, rebuild the OCR image from a tested TheRock-compatible base and set `OCR_VLLM_GPU_MEMORY_UTILIZATION` conservatively. vLLM’s available-memory accounting is not reliable on unified-memory hardware, so it must not be allowed to preallocate around the existing 28 GiB host reserve.
