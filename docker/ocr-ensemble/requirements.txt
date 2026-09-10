@@ -1,0 +1,30 @@
+# Author: Perijn
+# Summary: Pins the Python runtime for the OCR ensemble sidecar: MinerU, PP-OCRv5, Surya, Tesseract, and consensus scoring.
+# Usage: Installed by docker/ocr-ensemble/Dockerfile. Freeze every specifier to an exact version after the first successful build.
+#
+# FREEZE THESE AFTER THE FIRST GREEN BUILD. The specifiers below are ranges because
+# cross-package resolution (torch, paddlepaddle, surya, transformers) is only
+# provable by resolving them together on the target image. This matches the
+# "pin and validate after a successful soak test" policy in docs/operations.md.
+#
+# MinerU transformers backend. Requires transformers>=5.10.1,<6 per mineru-vl-utils.
+mineru-vl-utils[transformers]>=2.0,<3
+
+# PP-OCRv5 detection + recognition. CPU execution; no ROCm build exists for gfx1151.
+paddlepaddle>=3.0,<4
+paddleocr>=3.0,<4
+
+# Tesseract bindings. The tesseract-ocr binary itself is installed by the Dockerfile.
+pytesseract>=0.3.10
+
+# Consensus Entropy (CVPR 2026): agreement metric over N OCR outputs.
+# The fusion layer imports this unconditionally and fails fast when it is absent,
+# rather than silently substituting a different metric.
+consensus-entropy>=0.1
+
+# Service layer.
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.32,<0.33
+pillow>=11.0,<12
+pypdfium2>=4.30,<6
+psycopg[binary]>=3.2,<4
