@@ -52,15 +52,22 @@ app = FastAPI(
 class OcrRequest(BaseModel):
     """One rendered page submitted for a transient full audit."""
 
-    image_b64: str = Field(..., description="Base64-encoded PNG, JPEG, or WebP page image.")
+    image_b64: str = Field(
+        ..., description="Base64-encoded PNG, JPEG, or WebP page image."
+    )
     page_ref: str | None = Field(None, description="Caller correlation id.")
-    engines: list[str] | None = Field(None, description="Optional engine subset.")
+    engines: list[str] | None = Field(
+        None,
+        description="Optional diagnostic engine subset; subset results always require review.",
+    )
 
 
 class DocumentRequest(BaseModel):
     """One image or PDF source document submitted for durable review."""
 
-    document_b64: str = Field(..., description="Base64-encoded image or PDF source document.")
+    document_b64: str = Field(
+        ..., description="Base64-encoded image or PDF source document."
+    )
     filename: str = Field(..., min_length=1, max_length=255)
     media_type: str = Field("application/pdf", max_length=127)
 
@@ -167,15 +174,24 @@ def _select_engines(names: list[str] | None) -> list[Any]:
     return [by_name[name] for name in names]
 
 
-def _run_ensemble(image: Any, names: list[str] | None) -> tuple[FusionResult, list[EngineResult]]:
-    """Run selected engines serially under the configured memory boundary."""
+def _run_ensemble(
+    image: Any, names: list[str] | None
+) -> tuple[FusionResult, list[EngineResult]]:
+    """Run selected engines serially under the configured memory boundary.
+
+    A caller-selected subset is useful for diagnostic comparisons, but it cannot
+    yield a four-engine validated acceptance verdict.
+    """
     with _run_lock:
         results = [engine.recognize(image) for engine in _select_engines(names)]
-    return _FUSION.fuse(results), results
+    return _FUSION.fuse(results, allow_auto_accept=names is None), results
 
 
 def _response_from_results(
-    fused: FusionResult, results: list[EngineResult], page_ref: str | None, elapsed_ms: int
+    fused: FusionResult,
+    results: list[EngineResult],
+    page_ref: str | None,
+    elapsed_ms: int,
 ) -> OcrResponse:
     """Convert fusion and engine results into a JSON-safe public audit record."""
     outputs = {
@@ -203,10 +219,12 @@ def _response_from_results(
     )
 
 
-def _audit_page(image: Any, page_ref: str | None = None) -> OcrResponse:
-    """Run one page through the ensemble and retain every engine output in memory."""
+def _audit_page(
+    image: Any, page_ref: str | None = None, names: list[str] | None = None
+) -> OcrResponse:
+    """Run one page through the requested ensemble and retain its audit in memory."""
     started = time.monotonic()
-    fused, results = _run_ensemble(image, None)
+    fused, results = _run_ensemble(image, names)
     return _response_from_results(
         fused, results, page_ref, int((time.monotonic() - started) * 1000)
     )
@@ -227,13 +245,20 @@ def health(response: Response) -> dict[str, Any]:
     ready = len(live) == len(_ENGINES)
     if not ready:
         response.status_code = 503
-    return {"status": "ok" if ready else "degraded", "live_engines": live, "engines": status, "thresholds": _CONFIG.__dict__}
+    return {
+        "status": "ok" if ready else "degraded",
+        "live_engines": live,
+        "engines": status,
+        "thresholds": _CONFIG.__dict__,
+    }
 
 
 @app.post("/ocr", response_model=OcrResponse)
 def ocr(request: OcrRequest) -> OcrResponse:
     """Run a transient, single-page audit without retaining source data."""
-    return _audit_page(_decode_image(request.image_b64), request.page_ref)
+    return _audit_page(
+        _decode_image(request.image_b64), request.page_ref, request.engines
+    )
 
 
 @app.post("/documents", response_model=DocumentResponse)
