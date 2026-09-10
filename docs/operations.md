@@ -20,7 +20,7 @@ Worked example: Start the stack, wait for the OCR sidecar's first model load, up
 
 Halogen uses two 131K-context slots and a 262K shared KV pool. `HALOGEN_HOST_RESERVE_GIB` is intentionally set to 28 GiB, leaving headroom for the persistent embedding and reranker workloads. Do not raise slots, context, or pool size without a fresh load and concurrency benchmark.
 
-Qwen and Ciru Ornith have no inactivity-based unload: llama-swap sets their TTL to zero. Halogen and the Ciru runtime can take minutes to load. llama-swap waits for each model `/health` endpoint before forwarding the first request. Ciru is configured for 131K-token sessions and no more than six active agent sessions, with a 44 GiB shared KV/state pool. Its published profile measured a 95.35 GiB whole-host peak; measure coexistence before loading it beside Qwen and OCR.
+Qwen and Ciru Ornith preload together at startup with no routing profiles, groups, or swap matrix, and llama-swap sets their TTL to zero. Halogen and the Ciru runtime can take minutes to load; llama-swap waits for each model's `/health` endpoint before reporting startup ready. Ciru is configured for 131K-token sessions and no more than six active agent sessions, with a 44 GiB shared KV/state pool. Its published deployment measured a 95.35 GiB whole-host peak; measure coexistence with Qwen and OCR before production use.
 
 ## Halogen PP/TG telemetry
 
@@ -60,7 +60,7 @@ The defaults in `.env.example` are starting points, not benchmark-derived guaran
 
 ## Model lifecycle
 
-The routing matrix permits the configured Qwen, Ciru Ornith, retrieval, and OCR forwarder processes concurrently; memory limits—not profile names—remain the practical resource boundary. `role/implementer`, `role/tester`, and `role/documenter` use the Ciru runtime directly. You can explicitly unload Qwen through `POST /api/models/unload/qwen3.8-flash-next` or Ciru Ornith through `POST /api/models/unload/ciru-ornith-1.5-halo-agent`; the next matching role request reloads it. Do not rely on an idle timeout.
+No llama-swap profiles, groups, or swap matrix restrict the configured Qwen, Ciru Ornith, retrieval, and OCR-forwarder processes; all are preloaded together. Memory limits—not profile names—remain the practical resource boundary. `role/implementer`, `role/tester`, and `role/documenter` use the Ciru runtime directly. You can explicitly unload Qwen through `POST /api/models/unload/qwen3.8-flash-next` or Ciru Ornith through `POST /api/models/unload/ciru-ornith-1.5-halo-agent`; the next matching role request reloads it. Do not rely on an idle timeout.
 
 ## Update policy
 
