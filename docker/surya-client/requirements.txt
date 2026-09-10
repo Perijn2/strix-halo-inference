@@ -1,0 +1,6 @@
+# Author: Perijn
+# Summary: Pins the incompatible Surya 2 SDK environment used only by the internal Surya client sidecar.
+# Usage: Installed by docker/surya-client/Dockerfile; keep it separate from MinerU because Surya currently requires Pillow <11 while MinerU requires Pillow >=11.
+surya-ocr==0.22.1
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.32,<0.33
