@@ -103,12 +103,25 @@ models:
         top_p?: 0.95
         top_k?: 20
       setParamsByID:
+        # Thinking uses the model's recommended moderate sampling settings to
+        # preserve reasoning and tool-use reliability.
         role/implementer:
           enable_thinking: true
+          temperature: 0.6
+          top_p: 0.95
+          top_k: 20
         role/tester:
           enable_thinking: true
+          temperature: 0.6
+          top_p: 0.95
+          top_k: 20
+        # Direct instruct mode is tightly constrained to favor clear,
+        # repeatable documentation over exploratory reasoning.
         role/documenter:
           enable_thinking: false
+          temperature: 0.4
+          top_p: 0.80
+          top_k: 20
 
   qwen3-embedding-4b:
     name: Qwen3 Embedding 4B
