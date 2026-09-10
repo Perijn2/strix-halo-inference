@@ -31,7 +31,7 @@ Reliable Docker Compose inference for a dedicated Ryzen AI Max+ 395 / Radeon 806
 | `role/rerank` | BGE reranker v2-m3 |
 | `role/ocr` | Four-engine validated OCR |
 
-Retrieval preloads at startup. OCR is a separate, always-on, memory-capped sidecar; llama-swap owns only its local supervised forwarder and stable `role/ocr` ID. llama-swap starts Qwen and the Ciru Ornith runtime on their first role requests and keeps them loaded (`ttl: 0`) until an explicit llama-swap unload action. The deployed Ciru text profile limits each session to 131K tokens and admits up to six active agent sessions, while retaining its shared 44 GiB KV/state pool; provision the release's documented whole-host memory budget before enabling it.
+llama-swap preloads Qwen, Ciru Ornith, embedding, and reranking together at startup, without routing profiles or a swap matrix. OCR is a separate, always-on, memory-capped sidecar; llama-swap owns only its local supervised forwarder and stable `role/ocr` ID. All llama-swap children use `ttl: 0` and stay loaded until an explicit unload action. The deployed Ciru configuration limits each session to 131K tokens and admits up to six active agent sessions, while retaining its shared 44 GiB KV/state pool; provision the release's documented whole-host memory budget before enabling it.
 
 ## Start
 
@@ -76,11 +76,11 @@ After `docker compose up -d --build`, open `https://localhost:8443/ocr-playgroun
 
 ## Ciru Ornith lifecycle
 
-The old `Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf` llama.cpp process is no longer used. `role/implementer`, `role/tester`, and `role/documenter` start the Ciru launcher from `/ornith/bundle/serve.sh`, preserving its custom quantization, native kernels, DFlash2 drafter, prefix cache, and OpenAI-compatible tool calling. `:think` and `:fast` variants reuse the same loaded Ciru process; they do not reload model weights.
+The old `Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf` llama.cpp process is no longer used. llama-swap preloads the Ciru launcher from `/ornith/bundle/serve.sh` beside Qwen, preserving its custom quantization, native kernels, DFlash2 drafter, prefix cache, and OpenAI-compatible tool calling. `role/implementer`, `role/tester`, and `role/documenter` reuse that loaded Ciru process.
 
 ## Qwen lifecycle
 
-llama-swap owns the Halogen process. The first request for a Qwen role starts Halogen and waits for `/health`; cold loading can take minutes. It remains loaded until explicitly removed:
+llama-swap owns and preloads the Halogen process beside Ciru Ornith, waiting for each model's `/health` endpoint before reporting startup ready. Cold loading can take minutes. Qwen remains loaded until explicitly removed:
 
 ```bash
 curl -k \

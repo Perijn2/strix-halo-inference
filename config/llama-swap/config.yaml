@@ -14,29 +14,9 @@ hooks:
       - qwen3-embedding-4b
       - bge-reranker-v2-m3
 
-routing:
-  router:
-    use: matrix
-    settings:
-      matrix:
-        vars:
-          q: qwen3.8-flash-next
-          o: ciru-ornith-1.5-halo-agent
-          e: qwen3-embedding-4b
-          r: bge-reranker-v2-m3
-          x: ocr-ensemble
-        evict_costs:
-          q: 100
-          o: 20
-          e: 10
-          r: 10
-          # This cost applies only to the supervised socat forwarder. The OCR
-          # models themselves live in the memory-capped sidecar container.
-          x: 100
-        # One complete set permits all llama-swap children and the OCR forwarder
-        # to remain loaded and serve requests concurrently.
-        sets:
-          all-models: "q & o & e & r & x"
+# No routing profiles, groups, or swap matrix are configured. llama-swap may
+# therefore keep every child resident simultaneously; startup preloads Qwen and
+# Ornith together, while ttl: 0 prevents either from being evicted by idleness.
 
 models:
   qwen3.8-flash-next:
@@ -96,7 +76,7 @@ models:
     description: Ciru's Strix-Halo-specific packed Ornith runtime for implementation, testing, and documentation.
     # This checkpoint is incompatible with llama.cpp and stock vLLM. The mounted
     # release includes its pinned runtime, custom kernels, DFlash2 drafter, and
-    # launcher; preserve its supplied serving profile.
+    # launcher; preserve its supplied serving configuration.
     cmd: |
       # Override the release defaults: reserve 131K tokens for each session and
       # admit at most six concurrent agent sessions during initial deployment.
