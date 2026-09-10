@@ -6,11 +6,11 @@ Core principle: Caddy exposes the unauthenticated API and UI on the configured l
 
 Setup: Copy `.env.example` to `.env`, set host paths, run the generator to create the PostgreSQL password file and host group settings, download the documented model artifacts, then run `docker compose up -d`. PostgreSQL starts by default because it is the durable OCR audit ledger.
 
-Workflow: The default `orchestration` profile sends planner, architect, reviewer, and general roles to Halogen Qwen. llama-swap starts Qwen on its first routed request and can unload it explicitly through its UI or API. Embedding and reranking processes preload and remain available beside Qwen. `role/ocr` runs MinerU, PP-OCRv5, Tesseract, and Surya for every page and routes disagreement to review. Switch to the `engineering` profile only when Ornith should receive implementation roles. Query `GET /api/profiles` and update the profile through `PUT /api/profiles/active`.
+Workflow: Halogen Qwen handles orchestration, architecture, review, and general roles; Ciru Ornith handles implementation, testing, and documentation through its supplied custom vLLM/ROCm runtime. llama-swap starts and supervises each model on its first routed request. Embedding and reranking processes preload and remain available beside them. `role/ocr` runs MinerU, PP-OCRv5, Tesseract, and Surya for every page and routes disagreement to review.
 
 API guide: Use `/v1/chat/completions` with `model` set to a stable `role/...` ID. Use `role/embed` through `/v1/embeddings`, `role/rerank` through `/v1/rerank`, and `role/ocr` with one base64 image_url content part. The llama-swap UI is available at `/ui`; its administrative API is unauthenticated.
 
-Worked example: Run `cp .env.example .env`, configure paths, run `scripts/generate-secrets.sh`, start `docker compose up -d --build`, then call `curl -k https://localhost:8443/v1/models`. Select the engineering profile before sending a request with `model: role/implementer`.
+Worked example: Run `cp .env.example .env`, configure paths, run `scripts/generate-secrets.sh`, run `scripts/download-models.sh` on the Strix Halo Linux host, start `docker compose up -d --build`, then call `curl -k https://localhost:8443/v1/models`. Send implementation work with `model: role/implementer`.
 -->
 
 # Strix Halo inference
@@ -19,19 +19,19 @@ Reliable Docker Compose inference for a dedicated Ryzen AI Max+ 395 / Radeon 806
 
 ## Roles
 
-| Stable role | Orchestration profile | Engineering profile |
-| --- | --- | --- |
-| `role/orchestrator` | Qwen, thinking/high | disabled |
-| `role/architect` | Qwen, thinking/high | disabled |
-| `role/reviewer` | Qwen, thinking/high | disabled |
-| `role/implementer` | disabled | Ornith, thinking |
-| `role/tester` | disabled | Ornith, thinking |
-| `role/documenter` | disabled | Ornith, fast |
-| `role/embed` | Qwen3-Embedding-4B | Qwen3-Embedding-4B |
-| `role/rerank` | BGE reranker v2-m3 | BGE reranker v2-m3 |
-| `role/ocr` | Four-engine validated OCR | Four-engine validated OCR |
+| Stable role | Routed model |
+| --- | --- |
+| `role/orchestrator` | Halogen Qwen, thinking/high |
+| `role/architect` | Halogen Qwen, thinking/high |
+| `role/reviewer` | Halogen Qwen, thinking/high |
+| `role/implementer` | Ornith 1.5 Ciru Halo Agent, thinking |
+| `role/tester` | Ornith 1.5 Ciru Halo Agent, thinking |
+| `role/documenter` | Ornith 1.5 Ciru Halo Agent, fast |
+| `role/embed` | Qwen3-Embedding-4B |
+| `role/rerank` | BGE reranker v2-m3 |
+| `role/ocr` | Four-engine validated OCR |
 
-Retrieval preloads at startup. OCR is a separate, always-on, memory-capped sidecar; llama-swap owns only its local supervised forwarder and stable `role/ocr` ID. llama-swap loads Qwen on its first role request and keeps it loaded (`ttl: 0`) until an explicit llama-swap unload action. Halogen has two 131K slots sharing a 262K total KV pool.
+llama-swap preloads Qwen, Ciru Ornith, embedding, and reranking together at startup, without routing profiles or a swap matrix. OCR is a separate, always-on, memory-capped sidecar; llama-swap owns only its local supervised forwarder and stable `role/ocr` ID. All llama-swap children use `ttl: 0` and stay loaded until an explicit unload action. The deployed Ciru configuration limits each session to 131K tokens and admits up to six active agent sessions, while retaining its shared 44 GiB KV/state pool; provision the release's documented whole-host memory budget before enabling it.
 
 ## Start
 
@@ -48,7 +48,7 @@ docker compose up -d
 
 ## Model files
 
-The `MODELS_DIR` mount must contain the retrieval and OCR artifacts below. The Ciru vLLM checkpoint is mounted separately through `ORNITH_MODEL_DIR`:
+The `MODELS_DIR` mount must contain the retrieval and OCR artifacts below. `ORNITH_MODEL_DIR` is a separate mount containing the complete Ciru release and its installed runtime:
 
 ```text
 qwen3-embedding/Qwen3-Embedding-4B-Q6_K.gguf
@@ -58,9 +58,9 @@ surya/surya-2.gguf
 surya/surya-2-mmproj.gguf
 ```
 
-`HALOGEN_MODELS_DIR` is the flat model directory downloaded from the Halogen Qwen repository; it contains the `.hgn` checkpoint, quality overlay, and `tokenizer/` directory. `ORNITH_MODEL_DIR` must contain the files from [jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo](https://huggingface.co/jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo).
+`HALOGEN_MODELS_DIR` is the flat model directory downloaded from the Halogen Qwen repository; it contains the `.hgn` checkpoint, quality overlay, and `tokenizer/` directory. `ORNITH_MODEL_DIR` must contain the complete [jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo](https://huggingface.co/jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo) release, including `bundle/`, `runtime/`, and `installed-runtime/`. The included `INSTALL-ORNITH-RUNTIME.sh` creates `installed-runtime/`; its pinned vLLM/ROCm runtime and custom kernels are required—stock vLLM and the prior llama.cpp GGUF are incompatible.
 
-Use [`scripts/download-models.sh`](scripts/download-models.sh) to fetch Ciru's vLLM checkpoint and retrieval/OCR artifacts. Read [docs/operations.md](docs/operations.md) before operating Halogen.
+Use [`scripts/download-models.sh`](scripts/download-models.sh) to fetch the complete Ciru release, install its pinned runtime, and fetch retrieval/OCR artifacts. Run it on the Linux Strix Halo host with sufficient disk space and memory; the published Ciru profile reports a 95.35 GiB peak whole-host measurement. Read [docs/operations.md](docs/operations.md) before operating Halogen.
 
 ## Validated OCR
 
@@ -74,21 +74,13 @@ The initial deployment is CPU-first for the Python engines; Surya uses the exist
 
 After `docker compose up -d --build`, open `https://localhost:8443/ocr-playground/` and accept Caddy's local-certificate warning. Upload a PDF or image; the workspace renders/selects every page, stores the audit for 90 days, overlays normalized boxes from each OCR witness, and exposes a saved review history. The public gateway has a 32 MiB request cap, leaving roughly 24 MiB for a base64-encoded source upload.
 
-## Profile switching
+## Ciru Ornith lifecycle
 
-```bash
-curl -k https://localhost:8443/api/profiles
-curl -k \
-  -X PUT https://localhost:8443/api/profiles/active \
-  -H 'content-type: application/json' \
-  --data '{"name":"engineering"}'
-```
-
-The role profile changes routing and request parameters. `:think` and `:fast` variants reuse one loaded process; they do not reload model weights.
+The old `Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf` llama.cpp process is no longer used. llama-swap preloads the Ciru launcher from `/ornith/bundle/serve.sh` beside Qwen, preserving its custom quantization, native kernels, DFlash2 drafter, prefix cache, and OpenAI-compatible tool calling. `role/implementer`, `role/tester`, and `role/documenter` reuse that loaded Ciru process.
 
 ## Qwen lifecycle
 
-llama-swap owns the Halogen process. The first request for a Qwen role starts Halogen and waits for `/health`; cold loading can take minutes. It remains loaded until explicitly removed:
+llama-swap owns and preloads the Halogen process beside Ciru Ornith, waiting for each model's `/health` endpoint before reporting startup ready. Cold loading can take minutes. Qwen remains loaded until explicitly removed:
 
 ```bash
 curl -k \
