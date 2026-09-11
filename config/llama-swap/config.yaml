@@ -166,8 +166,13 @@ models:
   ocr-ensemble:
     name: OCR ensemble
     description: MinerU primary parser validated by PP-OCRv5, Tesseract, and Surya with consensus-entropy review routing.
+    # llama-swap shlex-splits this string and execs argv[0] itself without
+    # spawning a shell, so a leading `exec` is resolved as a program named
+    # "exec" and the forwarder dies with `exec: "exec": executable file not
+    # found in $PATH`. Run the bundled socat as the direct child instead;
+    # llama-swap still owns and signals this process on unload.
     cmd: |
-      exec socat TCP-LISTEN:${PORT},fork,reuseaddr TCP:ocr-ensemble:8090
+      socat TCP-LISTEN:${PORT},fork,reuseaddr TCP:ocr-ensemble:8090
     checkEndpoint: /health
     ttl: 0
     aliases: [role/ocr]
