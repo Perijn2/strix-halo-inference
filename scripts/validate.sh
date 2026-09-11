@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Author: Perijn
-# Summary: Validates deployment configuration, required model artifacts, and the exact Ciru launch command.
+# Summary: Validates deployment configuration, required model artifacts, and Ciru runtime prerequisites.
 # Usage: Create .env, run scripts/generate-secrets.sh and scripts/download-models.sh, then run this script before deployment.
 # Values are parsed as data rather than evaluated, so .env cannot execute shell code during validation.
 set -euo pipefail
@@ -18,12 +18,26 @@ test -r "$POSTGRES_PASSWORD_FILE" || {
   printf 'Cannot read POSTGRES_PASSWORD_FILE: %s\n' "$POSTGRES_PASSWORD_FILE"
   exit 1
 }
-test -x "$ORNITH_MODEL_DIR/bundle/serve.sh" || {
+test -f "$ORNITH_MODEL_DIR/bundle/serve.sh" || {
   printf 'Missing Ciru launcher: %s/bundle/serve.sh\n' "$ORNITH_MODEL_DIR"
   exit 1
 }
 test -x "$ORNITH_MODEL_DIR/installed-runtime/venv/bin/python" || {
-  printf 'Missing pinned Ciru runtime: run runtime/INSTALL-ORNITH-RUNTIME.sh in %s\n' "$ORNITH_MODEL_DIR"
+  printf 'Missing pinned Ciru runtime Python: run scripts/download-models.sh\n' >&2
+  exit 1
+}
+test -f "$ORNITH_MODEL_DIR/installed-runtime/runtime-env.sh" || {
+  printf 'Incomplete Ciru runtime: missing installed-runtime/runtime-env.sh; run scripts/download-models.sh\n' >&2
+  exit 1
+}
+: "${ORNITH_RUNTIME_PYTHON_ROOT:?run scripts/download-models.sh to set ORNITH_RUNTIME_PYTHON_ROOT}"
+test -d "$ORNITH_RUNTIME_PYTHON_ROOT" || {
+  printf 'Missing Ciru interpreter directory: %s\n' "$ORNITH_RUNTIME_PYTHON_ROOT" >&2
+  exit 1
+}
+expected_python_root="$(dirname "$(dirname "$(readlink -f "$ORNITH_MODEL_DIR/installed-runtime/venv/bin/python")")")"
+test "$ORNITH_RUNTIME_PYTHON_ROOT" = "$expected_python_root" || {
+  printf 'ORNITH_RUNTIME_PYTHON_ROOT does not match the Ciru venv interpreter\n' >&2
   exit 1
 }
 for model_dir in \
@@ -35,10 +49,10 @@ for model_dir in \
   }
 done
 
-# Validate the same intentional memory-control arguments Compose gives Ciru.
-ORNITH_RUNTIME_ROOT="$ORNITH_MODEL_DIR/installed-runtime" \
-  bash "$ORNITH_MODEL_DIR/bundle/serve.sh" --host 127.0.0.1 --port 8080 \
-  --context 131072 --max-seqs 6 --dry-run
+# The vendor launcher does not implement --dry-run; syntax-check it instead of
+# accidentally starting an inference server during preflight validation.
+bash -n "$ORNITH_MODEL_DIR/bundle/serve.sh"
+bash -n "$ORNITH_MODEL_DIR/bundle/packaging/serve.sh"
 
 docker compose --profile rag config >/dev/null
 printf '%s\n' 'Compose configuration and offline model prerequisites are valid.'
