@@ -16,6 +16,10 @@ Worked example: Start the stack, wait for the OCR sidecar's first model load, up
 
 # Operations
 
+## Isolated test deployment
+
+Use a distinct Compose project name and unused gateway port for a test stack, for example `CADDY_HTTP_PORT=18081 docker compose -p strix-halo-test up -d --build`. Do not run a full stable and full test model stack concurrently on one Strix Halo host: their combined unified-memory demand is unsafe. If Docker reports that a port is allocated, inspect the existing publisher with `docker ps --filter publish=18081` and choose another unused test port or stop only the disposable test project.
+
 ## Memory policy
 
 Halogen uses two 131K-context slots and a 262K shared KV pool. `HALOGEN_HOST_RESERVE_GIB` is intentionally set to 28 GiB, leaving headroom for the persistent embedding and reranker workloads. Do not raise slots, context, or pool size without a fresh load and concurrency benchmark.

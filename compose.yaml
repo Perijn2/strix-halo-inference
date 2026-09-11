@@ -113,7 +113,9 @@ services:
       OCR_AUDIT_DB_HOST: postgres
       OCR_AUDIT_DB_NAME: "${POSTGRES_DB:-inference}"
       OCR_AUDIT_DB_USER: "${POSTGRES_USER:-inference}"
-      OCR_AUDIT_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      # The root-only Compose secret is copied by the entrypoint before it drops
+      # privileges to the OCR account; the application never runs as root.
+      OCR_AUDIT_DB_PASSWORD_FILE: /run/ocr-secrets/postgres_password
       SURYA_CLIENT_URL: http://surya-client:8091/ocr
     volumes:
       - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
