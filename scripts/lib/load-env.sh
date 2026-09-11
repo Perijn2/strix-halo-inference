@@ -19,6 +19,10 @@ load_deployment_env() {
     }
     local key="${BASH_REMATCH[1]}"
     local value="${BASH_REMATCH[2]}"
+    # A .env checked out on Windows carries CRLF. Left in place, a value that looks
+    # blank is really "\r", so every "is this configured?" test reads it as set and
+    # a fresh clone is never stood in for. Strip the carriage return on read.
+    value="${value%$'\r'}"
     if [[ "$value" == *'$'* || "$value" == *'`'* ]]; then
       printf 'Shell expansion is not allowed in .env value: %s\n' "$key" >&2
       return 1
