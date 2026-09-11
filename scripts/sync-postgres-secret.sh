@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Author: Perijn
 # Summary: Repairs a drifted PostgreSQL credential by aligning the live role password with the current Compose secret file.
-# Usage: scripts/sync-postgres-secret.sh [--dry-run] while the initialized postgres service is running; override ENV_FILE and COMPOSE_FILE for a non-default project.
+# Usage: scripts/sync-postgres-secret.sh [--dry-run] [--no-restart] while the initialized postgres service is running; override ENV_FILE and COMPOSE_FILE for a non-default project.
 #
 # Core principle: the secret file is the source of truth and the audit ledger is never recreated.
 # The Postgres image applies POSTGRES_PASSWORD_FILE only while it initializes an empty data
@@ -16,14 +16,17 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 dry_run=false
-case "${1:-}" in
-  --dry-run) dry_run=true ;;
-  '') ;;
-  *)
-    printf 'Usage: scripts/sync-postgres-secret.sh [--dry-run]\n' >&2
-    exit 2
-    ;;
-esac
+no_restart=false
+for argument in "$@"; do
+  case "$argument" in
+    --dry-run) dry_run=true ;;
+    --no-restart) no_restart=true ;;
+    *)
+      printf 'Usage: scripts/sync-postgres-secret.sh [--dry-run] [--no-restart]\n' >&2
+      exit 2
+      ;;
+  esac
+done
 
 # shellcheck source=lib/load-env.sh
 source "$root/scripts/lib/load-env.sh"
@@ -112,8 +115,10 @@ printf 'Reconciled: scram-sha-256 now accepts %s for user "%s".\n' "$secret_file
 
 # A live ensemble reconnects per operation and recovers on its own; a crash-looped
 # one never reached that code path, so converge it explicitly and without touching
-# dependencies, reporting what was actually done rather than assuming.
-if docker compose -f "$compose_file" config --services 2>/dev/null | grep -qx 'ocr-ensemble'; then
+# dependencies, reporting what was actually done rather than assuming. Recovery
+# uses --no-restart because its temporary Compose environment may contain only the
+# interpolation placeholders needed to repair postgres.
+if [[ "$no_restart" == false ]] && docker compose -f "$compose_file" config --services 2>/dev/null | grep -qx 'ocr-ensemble'; then
   if docker compose -f "$compose_file" ps -a -q ocr-ensemble | grep -q .; then
     docker compose -f "$compose_file" restart ocr-ensemble >/dev/null 2>&1 || true
     printf '%s\n' 'Restarted ocr-ensemble so it re-reads the secret.'
