@@ -10,7 +10,7 @@ Workflow: The default `orchestration` profile sends planner, architect, reviewer
 
 API guide: Use `/v1/chat/completions` with `model` set to a stable `role/...` ID. Use `role/embed` through `/v1/embeddings`, `role/rerank` through `/v1/rerank`, and `role/ocr` with one base64 image_url content part. The llama-swap UI is available at `/ui`; its administrative API is unauthenticated.
 
-Worked example: Run `cp .env.example .env`, configure paths, run `scripts/generate-secrets.sh`, start `docker compose up -d --build`, then call `curl -k https://localhost:8443/v1/models`. Select the engineering profile before sending a request with `model: role/implementer`.
+Worked example: Run `cp .env.example .env`, configure paths, run `scripts/generate-secrets.sh`, run `scripts/download-models.sh` on the Strix Halo Linux host, start `docker compose up -d --build`, then call `curl http://<server-lan-ip>:8080/v1/models`. Send implementation work with `model: role/implementer`.
 -->
 
 # Strix Halo inference
@@ -41,10 +41,10 @@ cp .env.example .env
 ./scripts/generate-secrets.sh
 docker compose up -d
 # PostgreSQL starts by default for OCR audit history and may also store RAG metadata.
-# Localhost uses Caddy's local certificate; use -k for local curl tests.
+# Caddy is HTTP-only for LAN use; restrict its unauthenticated port with a host firewall.
 ```
 
-`scripts/generate-secrets.sh` writes the PostgreSQL password to the ignored `secrets/` directory and records numeric host `render`/`video` group IDs in `.env`. Run it with `--force` only when intentionally rotating the database credential.
+`scripts/generate-secrets.sh` writes the PostgreSQL password to the ignored `secrets/` directory and records numeric host `render`/`video` group IDs in `.env`. With an existing credential, `--force` performs a live `ALTER ROLE` through the running PostgreSQL service before atomically replacing the local secret; restart dependent services after it succeeds.
 
 ## Model files
 
@@ -56,6 +56,8 @@ bge-reranker/bge-reranker-v2-m3-Q8_0.gguf
 mineru/MinerU2.5-Pro-2605-1.2B/  # complete Hugging Face Transformers repository
 surya/surya-2.gguf
 surya/surya-2-mmproj.gguf
+paddle/PP-OCRv5_mobile_det/  # complete PaddleOCR detector repository
+paddle/PP-OCRv5_mobile_rec/  # complete PaddleOCR recognizer repository
 ```
 
 `HALOGEN_MODELS_DIR` is the flat model directory downloaded from the Halogen Qwen repository; it contains the `.hgn` checkpoint, quality overlay, and `tokenizer/` directory. `ORNITH_MODEL_DIR` must contain the files from [jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo](https://huggingface.co/jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo).
@@ -72,7 +74,7 @@ The initial deployment is CPU-first for the Python engines; Surya uses the exist
 
 ## OCR playground
 
-After `docker compose up -d --build`, open `https://localhost:8443/ocr-playground/` and accept Caddy's local-certificate warning. Upload a PDF or image; the workspace renders/selects every page, stores the audit for 90 days, overlays normalized boxes from each OCR witness, and exposes a saved review history. The public gateway has a 32 MiB request cap, leaving roughly 24 MiB for a base64-encoded source upload.
+After `docker compose up -d --build`, open `http://<server-lan-ip>:8080/ocr-playground/`. Upload a PDF or image; the workspace renders/selects every page, stores the audit for 90 days, overlays normalized boxes from each OCR witness, and exposes a saved review history. The public gateway has a 32 MiB request cap, leaving roughly 24 MiB for a base64-encoded source upload. The service also defaults to 100 pages, 40 million rendered pixels per page, and 2 GiB of retained audit artifacts; tune `OCR_MAX_*` and `OCR_AUDIT_MAX_BYTES` only after capacity testing.
 
 ## Profile switching
 
@@ -91,8 +93,8 @@ The role profile changes routing and request parameters. `:think` and `:fast` va
 llama-swap owns the Halogen process. The first request for a Qwen role starts Halogen and waits for `/health`; cold loading can take minutes. It remains loaded until explicitly removed:
 
 ```bash
-curl -k \
-  -X POST https://localhost:8443/api/models/unload/qwen3.8-flash-next
+curl \
+  -X POST http://<server-lan-ip>:8080/api/models/unload/qwen3.8-flash-next
 ```
 
 The next Qwen role request starts it again. There is no idle TTL unload.
