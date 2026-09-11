@@ -45,6 +45,9 @@ services:
       HALOGEN_KV_POOL_POSITIONS: "262144"
       HALOGEN_HOST_RESERVE_GIB: "${HALOGEN_HOST_RESERVE_GIB:-28}"
       HALOGEN_PROMPT_CACHE: "2"
+      # The Ciru launcher reads this location through bundle/paths.env. It must
+      # contain the release's installed-runtime directory created by its installer.
+      ORNITH_RUNTIME_ROOT: /ornith/installed-runtime
     volumes:
       - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
       - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro

@@ -49,6 +49,7 @@ hf download PaddlePaddle/PP-OCRv5_mobile_rec \
 
 cat <<'EOF'
 Downloaded static artifacts:
+  - Ornith 1.5 Ciru Halo Agent release + pinned runtime
   - MinerU2.5-Pro-2605-1.2B (Transformers primary)
   - Surya 2 GGUF + multimodal projector (Vulkan validator)
   - PP-OCRv5 mobile detector and recognizer (explicit local Paddle paths)
