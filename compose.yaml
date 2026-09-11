@@ -7,15 +7,13 @@
 # API guide: /v1/models lists role IDs. /v1/chat/completions accepts a base64 image_url for role/ocr. /upstream/ocr-ensemble/ocr exposes the structured OCR review result.
 # Worked example: `docker compose up -d`, then POST an OpenAI image message with `model: role/ocr` to Caddy. Pages with the review flag must go to a human queue.
 services:
-  # Summary: TLS edge proxy that exposes Caddy's public listener and forwards every inference request to llama-swap.
+  # Summary: HTTP-only LAN edge proxy that forwards inference requests and serves the OCR playground.
+  # Notes: This gateway has no application authentication; restrict the published port with a host firewall or private LAN.
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     ports:
       - "${CADDY_HTTP_PORT:-8080}:80"
-      - "${CADDY_HTTPS_PORT:-8443}:443"
-    environment:
-      CADDY_SITE: ${CADDY_SITE:-localhost}
     volumes:
       - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./web/ocr-playground:/srv/ocr-playground:ro
@@ -54,7 +52,8 @@ services:
       - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
       - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
       - ${HALOGEN_MODELS_DIR:?set HALOGEN_MODELS_DIR in .env}:/halogen-models:ro
-      - ${ORNITH_MODEL_DIR:?set ORNITH_MODEL_DIR in .env}:/ornith:ro
+      # Ciru builds GPU/runtime artifacts here on first start; keep release files immutable.
+      - ornith_cache:/ornith/bundle/cache
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
@@ -93,6 +92,9 @@ services:
       OCR_MINERU_MODEL_PATH: /models/mineru/MinerU2.5-Pro-2605-1.2B
       OCR_VLLM_GPU_MEMORY_UTILIZATION: "${OCR_VLLM_GPU_MEMORY_UTILIZATION:-0.35}"
       OCR_PADDLE_LANGUAGE: "${OCR_PADDLE_LANGUAGE:-en}"
+      # Provisioned on the host by scripts/download-models.sh; no runtime downloads are allowed.
+      OCR_PADDLE_DETECTION_MODEL_DIR: /models/paddle/PP-OCRv5_mobile_det
+      OCR_PADDLE_RECOGNITION_MODEL_DIR: /models/paddle/PP-OCRv5_mobile_rec
       OCR_TESSERACT_LANGUAGE: "${OCR_TESSERACT_LANGUAGE:-eng}"
       OCR_AGREE_THRESHOLD: "${OCR_AGREE_THRESHOLD:-0.92}"
       OCR_CLASSICAL_PAIR_AGREE: "${OCR_CLASSICAL_PAIR_AGREE:-0.90}"
@@ -101,6 +103,10 @@ services:
       OCR_ENTROPY_REVIEW_FLOOR: "${OCR_ENTROPY_REVIEW_FLOOR:-0.60}"
       OCR_AUDIT_DATA_DIR: /audit-data
       OCR_AUDIT_RETENTION_DAYS: "${OCR_AUDIT_RETENTION_DAYS:-90}"
+      OCR_MAX_SOURCE_BYTES: "${OCR_MAX_SOURCE_BYTES:-25165824}"
+      OCR_MAX_DOCUMENT_PAGES: "${OCR_MAX_DOCUMENT_PAGES:-100}"
+      OCR_MAX_PAGE_PIXELS: "${OCR_MAX_PAGE_PIXELS:-40000000}"
+      OCR_AUDIT_MAX_BYTES: "${OCR_AUDIT_MAX_BYTES:-2147483648}"
       OCR_AUDIT_DB_HOST: postgres
       OCR_AUDIT_DB_NAME: "${POSTGRES_DB:-inference}"
       OCR_AUDIT_DB_USER: "${POSTGRES_USER:-inference}"
@@ -151,11 +157,12 @@ services:
     mem_limit: "${OCR_SURYA_CLIENT_MEMORY_LIMIT_GIB:-2}g"
     networks: [inference]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3)\""]
+      # Readiness constructs the SDK predictor and verifies the remote Surya worker.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/ready', timeout=30)\""]
       interval: 30s
-      timeout: 5s
+      timeout: 45s
       retries: 5
-      start_period: 30s
+      start_period: 10m
 
   # Summary: Surya 2 VLM worker using the existing Vulkan llama.cpp build; only the isolated Surya SDK client calls it on the internal network.
   # Notes: The 4 GiB worker plus 6 GiB ensemble and 2 GiB SDK-client caps retain the chosen 12 GiB total OCR budget. Do not raise --parallel without a fresh memory benchmark.
@@ -231,6 +238,8 @@ volumes:
   caddy_data: {}
   caddy_config: {}
   ocr_cache: {}
+  # Writable Ciru first-start cache overlaid on the otherwise read-only release.
+  ornith_cache: {}
   ocr_audit_data: {}
   postgres_data: {}
 

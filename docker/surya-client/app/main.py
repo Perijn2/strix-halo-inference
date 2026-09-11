@@ -16,6 +16,8 @@ import binascii
 import io
 import re
 import threading
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import urlopen
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -74,6 +76,18 @@ def _get_predictor() -> Any:
         return _predictor
 
 
+def _assert_worker_ready() -> None:
+    """Verify that the configured remote Surya worker accepts health requests."""
+    import os
+
+    configured = os.environ.get("SURYA_INFERENCE_URL", "http://surya:8080/v1")
+    parts = urlsplit(configured)
+    health_url = urlunsplit((parts.scheme, parts.netloc, "/health", "", ""))
+    with urlopen(health_url, timeout=10) as response:  # noqa: S310 - deployment-owned URL.
+        if response.status != 200:
+            raise RuntimeError(f"Surya worker returned HTTP {response.status}")
+
+
 def _decode_image(value: str) -> Any:
     """Decode one base64 or data-URI image into RGB PIL data."""
     from PIL import Image
@@ -83,12 +97,16 @@ def _decode_image(value: str) -> Any:
     try:
         raw = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=422, detail="image_b64 is not valid base64") from exc
+        raise HTTPException(
+            status_code=422, detail="image_b64 is not valid base64"
+        ) from exc
     try:
         image = Image.open(io.BytesIO(raw))
         image.load()
     except Exception as exc:  # noqa: BLE001 - client supplied malformed image.
-        raise HTTPException(status_code=422, detail=f"cannot decode image: {exc}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"cannot decode image: {exc}"
+        ) from exc
     return image.convert("RGB")
 
 
@@ -114,7 +132,12 @@ def _normalized_bbox(block: Any, page: Any) -> list[float] | None:
     if width <= 0 or height <= 0:
         return None
     return _clamp_bbox(
-        [(x0 - page_x0) / width, (y0 - page_y0) / height, (x1 - page_x0) / width, (y1 - page_y0) / height]
+        [
+            (x0 - page_x0) / width,
+            (y0 - page_y0) / height,
+            (x1 - page_x0) / width,
+            (y1 - page_y0) / height,
+        ]
     )
 
 
@@ -126,8 +149,21 @@ def _clamp_bbox(value: list[float]) -> list[float]:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    """Return liveness without starting a Surya prediction."""
+    """Return cheap process liveness without constructing model state."""
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready() -> dict[str, str]:
+    """Return readiness only after predictor initialization and worker reachability."""
+    try:
+        _assert_worker_ready()
+        _get_predictor()
+    except Exception as exc:  # noqa: BLE001 - readiness must expose startup failures.
+        raise HTTPException(
+            status_code=503, detail=f"Surya is not ready: {exc}"
+        ) from exc
+    return {"status": "ready"}
 
 
 @app.post("/ocr", response_model=SuryaResponse)
@@ -152,7 +188,9 @@ def ocr(request: SuryaRequest) -> SuryaResponse:
             if text:
                 text_parts.append(text)
             confidence = getattr(block, "confidence", None)
-            normalized_confidence = float(confidence) if confidence is not None else None
+            normalized_confidence = (
+                float(confidence) if confidence is not None else None
+            )
             if normalized_confidence is not None:
                 confidences.append(normalized_confidence)
             blocks.append(

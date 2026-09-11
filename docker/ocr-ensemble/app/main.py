@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import math
 import os
 import threading
 import time
@@ -41,6 +42,10 @@ _CONFIG = FusionConfig(
     entropy_review_floor=float(os.environ.get("OCR_ENTROPY_REVIEW_FLOOR", "0.60")),
 )
 _FUSION = FusionEngine(_CONFIG)
+_MAX_SOURCE_BYTES = int(os.environ.get("OCR_MAX_SOURCE_BYTES", str(24 * 1024 * 1024)))
+_MAX_DOCUMENT_PAGES = int(os.environ.get("OCR_MAX_DOCUMENT_PAGES", "100"))
+_MAX_PAGE_PIXELS = int(os.environ.get("OCR_MAX_PAGE_PIXELS", str(40_000_000)))
+_RENDER_SCALE = 192 / 72
 
 app = FastAPI(
     title="strix-halo ocr-ensemble",
@@ -134,13 +139,26 @@ def _decode_image(payload: str) -> Any:
 
 
 def _render_document(source: bytes, media_type: str, filename: str) -> list[bytes]:
-    """Render a PDF or image source into page PNG bytes at a review-safe DPI."""
+    """Render a bounded PDF or image source into review-safe PNG pages.
+
+    The limits protect the single-worker OCR pipeline and durable audit volume from
+    otherwise valid documents whose page count or rendered pixel area is excessive.
+    """
     from PIL import Image
 
+    if len(source) > _MAX_SOURCE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"source exceeds the {_MAX_SOURCE_BYTES}-byte upload limit",
+        )
     is_pdf = media_type == "application/pdf" or filename.lower().endswith(".pdf")
     if not is_pdf:
         try:
-            image = Image.open(io.BytesIO(source)).convert("RGB")
+            image = Image.open(io.BytesIO(source))
+            _validate_image_pixels(image.width, image.height, "source image")
+            image = image.convert("RGB")
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001 - malformed caller data is a 422.
             raise HTTPException(
                 status_code=422, detail=f"source image cannot be decoded: {exc}"
@@ -151,12 +169,23 @@ def _render_document(source: bytes, media_type: str, filename: str) -> list[byte
         import pypdfium2 as pdfium
 
         document = pdfium.PdfDocument(source)
-        pages = []
-        # 192 DPI preserves small print without exploding CPU RAM on long PDFs.
-        for page in document:
-            pages.append(
-                _png_bytes(page.render(scale=192 / 72).to_pil().convert("RGB"))
+        if len(document) > _MAX_DOCUMENT_PAGES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"PDF exceeds the {_MAX_DOCUMENT_PAGES}-page limit",
             )
+        pages = []
+        # Validate page dimensions before PDFium allocates a high-DPI raster.
+        for number, page in enumerate(document, start=1):
+            width, height = page.get_size()
+            _validate_image_pixels(
+                math.ceil(width * _RENDER_SCALE),
+                math.ceil(height * _RENDER_SCALE),
+                f"PDF page {number}",
+            )
+            pages.append(_png_bytes(page.render(scale=_RENDER_SCALE).to_pil().convert("RGB")))
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001 - external PDF parser boundary.
         raise HTTPException(
             status_code=422, detail=f"PDF rendering failed: {exc}"
@@ -164,6 +193,15 @@ def _render_document(source: bytes, media_type: str, filename: str) -> list[byte
     if not pages:
         raise HTTPException(status_code=422, detail="PDF contains no renderable pages")
     return pages
+
+
+def _validate_image_pixels(width: int, height: int, label: str) -> None:
+    """Reject an image whose decoded raster would exceed the configured cap."""
+    if width <= 0 or height <= 0 or width * height > _MAX_PAGE_PIXELS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{label} exceeds the {_MAX_PAGE_PIXELS}-pixel limit",
+        )
 
 
 def _png_bytes(image: Any) -> bytes:
@@ -285,14 +323,17 @@ def submit_document(request: DocumentRequest) -> DocumentResponse:
     for page_number, page in enumerate(pages, start=1):
         image = Image.open(io.BytesIO(page)).convert("RGB")
         audits.append(_audit_page(image, f"{document_id}:{page_number}"))
-    _STORE.save_document_with_audits(
-        document_id=document_id,
-        filename=Path(request.filename).name,
-        media_type=request.media_type,
-        source=source,
-        pages=pages,
-        audits=[audit.model_dump(mode="json") for audit in audits],
-    )
+    try:
+        _STORE.save_document_with_audits(
+            document_id=document_id,
+            filename=Path(request.filename).name,
+            media_type=request.media_type,
+            source=source,
+            pages=pages,
+            audits=[audit.model_dump(mode="json") for audit in audits],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
     document = _STORE.get_document(document_id)
     assert document is not None  # The preceding insert is transactional and required.
     return DocumentResponse(
@@ -350,11 +391,8 @@ def chat_completions(payload: dict[str, Any]) -> dict[str, Any]:
                 "finish_reason": "stop",
             }
         ],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": len(audit.text),
-            "total_tokens": len(audit.text),
-        },
+        # OCR engines do not expose a tokenizer-compatible accounting signal.
+        # Omit usage rather than presenting character counts as token counts.
     }
 
 

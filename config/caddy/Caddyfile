@@ -1,13 +1,8 @@
 # Author: Perijn
 # Summary: Serves the same-origin OCR playground and forwards every other public inference request to llama-swap without application-level authentication.
 # Usage: Open /ocr-playground/ for the OCR UI; restrict network access with a host firewall or private network before exposing this listener.
-{
-	default_sni {$CADDY_SITE:localhost}
-	fallback_sni {$CADDY_SITE:localhost}
-}
-
-{$CADDY_SITE:localhost} {
-	tls internal
+# Explicit HTTP catch-all: LAN IP requests commonly carry Host: <server-ip>, not localhost.
+http:// {
 
 	log {
 		output stdout

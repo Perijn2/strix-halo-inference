@@ -30,7 +30,16 @@ LEDGER = re.compile(
     r"\d+ rounds, commit [\d.]+/round \| prompt (\d+)"
     r"(?: \((\d+) cached\))?, prefill ([\d.]+)s"
 )
-HOP_BY_HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
+HOP_BY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+}
 
 
 @dataclass(frozen=True)
@@ -52,7 +61,10 @@ class LedgerTiming:
             "predicted_n": self.output_tokens,
             "prompt_ms": self.prefill_seconds * 1000,
             "predicted_ms": self.decode_seconds * 1000,
-            "prompt_per_second": (self.prompt_tokens - self.cached_tokens) / self.prefill_seconds if self.prefill_seconds else 0,
+            "prompt_per_second": (self.prompt_tokens - self.cached_tokens)
+            / self.prefill_seconds
+            if self.prefill_seconds
+            else 0,
             "predicted_per_second": self.tokens_per_second,
         }
 
@@ -62,7 +74,10 @@ class Ledger:
 
     def __init__(self) -> None:
         """Initialize an empty, synchronized bounded ledger queue."""
-        self._items: collections.deque[LedgerTiming] = collections.deque(maxlen=256)
+        self._items: collections.deque[tuple[int, LedgerTiming]] = collections.deque(
+            maxlen=256
+        )
+        self._sequence = 0
         self._condition = threading.Condition()
 
     def add_line(self, line: str) -> None:
@@ -71,20 +86,48 @@ class Ledger:
         if not match:
             return
         output, decode, tps, prompt, cached, prefill = match.groups()
-        timing = LedgerTiming(int(output), float(decode), float(tps), int(prompt), int(cached or 0), float(prefill))
+        timing = LedgerTiming(
+            int(output),
+            float(decode),
+            float(tps),
+            int(prompt),
+            int(cached or 0),
+            float(prefill),
+        )
         with self._condition:
-            self._items.append(timing)
+            self._sequence += 1
+            self._items.append((self._sequence, timing))
             self._condition.notify_all()
 
-    def take(self, output_tokens: int | None, prompt_tokens: int | None, timeout: float = 2.0) -> LedgerTiming | None:
-        """Take the matching ledger record, waiting briefly for the API log flush."""
+    def mark(self) -> int:
+        """Return a ledger boundary before one serialized chat request starts."""
+        with self._condition:
+            return self._sequence
+
+    def take(
+        self,
+        output_tokens: int | None,
+        prompt_tokens: int | None,
+        timeout: float = 2.0,
+        *,
+        after: int = 0,
+    ) -> LedgerTiming | None:
+        """Take a post-boundary matching ledger record, waiting for log flush."""
         deadline = time.monotonic() + timeout
         with self._condition:
             while True:
-                for index, timing in enumerate(self._items):
-                    if output_tokens is not None and timing.output_tokens != output_tokens:
+                for index, (sequence, timing) in enumerate(self._items):
+                    if sequence <= after:
                         continue
-                    if prompt_tokens is not None and timing.prompt_tokens != prompt_tokens:
+                    if (
+                        output_tokens is not None
+                        and timing.output_tokens != output_tokens
+                    ):
+                        continue
+                    if (
+                        prompt_tokens is not None
+                        and timing.prompt_tokens != prompt_tokens
+                    ):
                         continue
                     del self._items[index]
                     return timing
@@ -105,7 +148,11 @@ def usage_counts(payload: bytes) -> tuple[int | None, int | None]:
 
 def timing_event(timing: LedgerTiming) -> bytes:
     """Encode a harmless final OpenAI-compatible SSE chunk with timing metadata."""
-    return b"data: " + json.dumps({"timings": timing.as_timings()}, separators=(",", ":")).encode() + b"\n\n"
+    return (
+        b"data: "
+        + json.dumps({"timings": timing.as_timings()}, separators=(",", ":")).encode()
+        + b"\n\n"
+    )
 
 
 class HalogenProxyHandler(BaseHTTPRequestHandler):
@@ -113,6 +160,7 @@ class HalogenProxyHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     ledger: ClassVar[Ledger]
+    chat_lock: ClassVar[threading.Lock] = threading.Lock()
     upstream_port: ClassVar[int]
 
     def do_GET(self) -> None:  # noqa: N802
@@ -130,16 +178,36 @@ class HalogenProxyHandler(BaseHTTPRequestHandler):
     def _proxy(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length) if length else b""
-        connection = http.client.HTTPConnection("127.0.0.1", self.upstream_port, timeout=3700)
-        headers = {key: value for key, value in self.headers.items() if key.lower() not in HOP_BY_HOP_HEADERS | {"host"}}
+        is_chat_request = (
+            self.command == "POST"
+            and self.path.split("?", 1)[0] == "/v1/chat/completions"
+        )
+        ledger_mark = 0
+        if is_chat_request:
+            # Halogen logs no request ID. Serialize decorated chats so equal token
+            # counts cannot attach a timing record to the wrong response.
+            self.chat_lock.acquire()
+            ledger_mark = self.ledger.mark()
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.upstream_port, timeout=3700
+        )
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in HOP_BY_HOP_HEADERS | {"host"}
+        }
         headers["Host"] = f"127.0.0.1:{self.upstream_port}"
         try:
             connection.request(self.command, self.path, body=body, headers=headers)
             response = connection.getresponse()
             content_type = response.getheader("Content-Type", "")
-            is_chat = self.command == "POST" and self.path.split("?", 1)[0] == "/v1/chat/completions"
+            is_chat = is_chat_request
             is_stream = "text/event-stream" in content_type
-            forwarded = {key: value for key, value in response.getheaders() if key.lower() not in HOP_BY_HOP_HEADERS | {"content-length"}}
+            forwarded = {
+                key: value
+                for key, value in response.getheaders()
+                if key.lower() not in HOP_BY_HOP_HEADERS | {"content-length"}
+            }
             self.send_response(response.status, response.reason)
             for key, value in forwarded.items():
                 self.send_header(key, value)
@@ -148,11 +216,11 @@ class HalogenProxyHandler(BaseHTTPRequestHandler):
                 self.send_header("X-Halogen-Telemetry", "ledger")
             self.end_headers()
             if is_stream and is_chat:
-                self._stream_with_timings(response)
+                self._stream_with_timings(response, ledger_mark)
             else:
                 payload = response.read()
                 if is_chat and response.status == 200:
-                    timing = self.ledger.take(*usage_counts(payload))
+                    timing = self.ledger.take(*usage_counts(payload), after=ledger_mark)
                     if timing:
                         payload = add_timings(payload, timing)
                 self.wfile.write(payload)
@@ -161,9 +229,13 @@ class HalogenProxyHandler(BaseHTTPRequestHandler):
             self.send_error(502, f"Halogen upstream unavailable: {exc}")
         finally:
             connection.close()
+            if is_chat_request:
+                self.chat_lock.release()
             self.close_connection = True
 
-    def _stream_with_timings(self, response: http.client.HTTPResponse) -> None:
+    def _stream_with_timings(
+        self, response: http.client.HTTPResponse, ledger_mark: int
+    ) -> None:
         """Forward SSE immediately and insert timing event immediately before DONE."""
         buffered = b""
         output_tokens = prompt_tokens = None
@@ -178,7 +250,9 @@ class HalogenProxyHandler(BaseHTTPRequestHandler):
                     output_tokens = output if output is not None else output_tokens
                     prompt_tokens = prompt if prompt is not None else prompt_tokens
                 if stripped == b"data: [DONE]" and not sent_timing:
-                    timing = self.ledger.take(output_tokens, prompt_tokens)
+                    timing = self.ledger.take(
+                        output_tokens, prompt_tokens, after=ledger_mark
+                    )
                     if timing:
                         self.wfile.write(timing_event(timing))
                     sent_timing = True
@@ -224,7 +298,14 @@ def main() -> int:
 
     env = os.environ.copy()
     env["HALOGEN_API_PORT"] = str(args.port + 1)
-    child = subprocess.Popen([args.entrypoint, "all"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    child = subprocess.Popen(
+        [args.entrypoint, "all"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
     ledger = Ledger()
     threading.Thread(target=relay_output, args=(child, ledger), daemon=True).start()
     HalogenProxyHandler.ledger = ledger
