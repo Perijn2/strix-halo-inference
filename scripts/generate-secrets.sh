@@ -3,6 +3,7 @@
 # Summary: Generates the PostgreSQL credential, safely rotates a live database credential, and records host GPU group IDs.
 # Usage: Create .env from .env.example and run this script; use --force only while the initialized postgres service is running.
 # The script never replaces an existing password file until PostgreSQL has accepted the new credential.
+# It also refuses to mint a fresh credential while a database already exists here; scripts/sync-postgres-secret.sh repairs that drift without discarding the audit ledger.
 set -euo pipefail
 
 force=false
@@ -66,6 +67,19 @@ if [[ "$force" == true && -e "$postgres_password_file" ]]; then
   fi
   mv -f "$temporary_password" "$postgres_password_file"
 elif [[ ! -e "$postgres_password_file" ]]; then
+  # Minting a credential that an already-initialized data directory never adopted
+  # is exactly how a secret file drifts away from the stored verifier. Refuse it
+  # here rather than leave the operator a healthy-looking pg_isready over a database
+  # that rejects every real client.
+  if command -v docker >/dev/null 2>&1 &&
+    {
+      docker compose -f "$root/compose.yaml" ps -a -q postgres 2>/dev/null | grep -q . ||
+        docker volume ls --filter name=postgres_data -q 2>/dev/null | grep -q .
+    }; then
+    printf '%s\n' 'Refusing to mint a new credential: a postgres container or postgres_data volume already exists here, and its stored verifier is unknown to the missing secret file.' >&2
+    printf '%s\n' 'Run scripts/sync-postgres-secret.sh to adopt the credential you want, or discard the audit ledger with docker compose down -v first.' >&2
+    exit 1
+  fi
   postgres_password="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | cut -c1-48)"
   printf '%s' "$postgres_password" > "$postgres_password_file"
 fi
