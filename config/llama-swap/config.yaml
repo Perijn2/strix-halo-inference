@@ -78,6 +78,10 @@ models:
       # Do not override its context, cache, or sequence settings here.
       bash /ornith/bundle/serve.sh --host 127.0.0.1 --port ${PORT}
     checkEndpoint: /health
+    # Cold load (pinned torch.compile + ~53s warmup + CUDA-graph capture)
+    # exceeds llama-swap's 120s default; without this larger window the router
+    # kills the engine mid-capture with no traceback. See docs/operations.md.
+    healthCheckTimeout: 900
     ttl: 0
     aliases: [ornith-1.5-35b-a3b]
     capabilities:
