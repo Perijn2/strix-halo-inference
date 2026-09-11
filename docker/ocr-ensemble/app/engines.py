@@ -17,13 +17,17 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
 import os
 import re
 import threading
+import time
 from io import BytesIO
 from dataclasses import dataclass, field
 from typing import Any
+
+_LOG = logging.getLogger("ocr.engines")
 
 MODELS_DIR = os.environ.get("MODELS_DIR", "/models")
 OCR_DEVICE = os.environ.get("OCR_DEVICE", "cpu")
@@ -91,10 +95,23 @@ class BaseEngine:
             return self._invoke is not None
         with self._load_lock:
             if self._invoke is None and self._load_error is None:
+                started = time.monotonic()
                 try:
                     self._invoke = self._load()
                 except Exception as exc:  # noqa: BLE001 - isolation is the contract here.
                     self._load_error = f"{type(exc).__name__}: {exc}"
+                    # The reason used to live only inside the /health body, so a
+                    # permanently degraded container never said why in its logs.
+                    _LOG.error(
+                        "engine %s failed to load after %.1fs: %s",
+                        self.name,
+                        time.monotonic() - started,
+                        self._load_error,
+                    )
+                else:
+                    _LOG.info(
+                        "engine %s loaded in %.1fs", self.name, time.monotonic() - started
+                    )
         return self._invoke is not None
 
     @property
