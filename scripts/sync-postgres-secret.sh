@@ -58,6 +58,31 @@ if ! docker compose -f "$compose_file" ps --status running -q "$postgres_service
   exit 1
 fi
 
+# A container in the running state is not yet a database accepting connections, and
+# the first answer is not the settled one. While the data directory is empty the
+# image runs a temporary server that listens on the Unix socket only, then shuts it
+# down and restarts into the real server. A Unix-socket readiness check can pass
+# against that temporary server and fail again a moment later, which reads as a
+# repair failure that fixes itself seconds after the script already gave up.
+# Readiness is therefore taken over TCP on loopback, which only the final server
+# binds. pg_isready authenticates nothing, so this proves the real server is
+# listening without saying anything about the credential.
+ready() {
+  docker compose -f "$compose_file" exec -T "$postgres_service" \
+    pg_isready -h 127.0.0.1 -U "$postgres_user" -d "$postgres_db" >/dev/null 2>&1
+}
+if ! ready; then
+  printf 'Waiting for %s to accept connections ...\n' "$postgres_service"
+  for _ in $(seq 1 30); do
+    sleep 2
+    ready && break
+  done
+fi
+if ! ready; then
+  printf '%s\n' "The ${postgres_service} service never accepted connections on its TCP listener; inspect its logs before syncing." >&2
+  exit 1
+fi
+
 # Loopback is trust in the default pg_hba, so a probe there would pass even with a
 # wrong password. Reach the container over its own network address instead, which
 # matches the scram-sha-256 path every consuming service actually uses.
@@ -116,8 +141,8 @@ printf 'Reconciled: scram-sha-256 now accepts %s for user "%s".\n' "$secret_file
 # A live ensemble reconnects per operation and recovers on its own; a crash-looped
 # one never reached that code path, so converge it explicitly and without touching
 # dependencies, reporting what was actually done rather than assuming. Recovery
-# uses --no-restart because its temporary Compose environment may contain only the
-# interpolation placeholders needed to repair postgres.
+# uses --no-restart because its temporary Compose environment stands in for values
+# the real deployment has not been configured with yet.
 if [[ "$no_restart" == false ]] && docker compose -f "$compose_file" config --services 2>/dev/null | grep -qx 'ocr-ensemble'; then
   if docker compose -f "$compose_file" ps -a -q ocr-ensemble | grep -q .; then
     docker compose -f "$compose_file" restart ocr-ensemble >/dev/null 2>&1 || true
