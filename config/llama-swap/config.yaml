@@ -50,7 +50,8 @@ models:
       in: [text]
       out: [text]
       tools: true
-      context: 262144
+      # Each request is limited by one HALOGEN_CTX slot; the 262K pool is shared across two slots.
+      context: 131072
     # llama-swap's native capabilities schema has no reasoning property. These
     # fields are valid model metadata published through /v1/models.
     metadata:
@@ -130,12 +131,12 @@ models:
     name: Qwen3 Embedding 4B
     description: Persistent high-quality retrieval embedding model.
     cmd: |
-      llama-server
-      --host 127.0.0.1 --port ${PORT}
-      --model /models/qwen3-embedding/Qwen3-Embedding-4B-Q6_K.gguf
-      --alias qwen3-embedding-4b
-      --embedding --pooling mean --n-gpu-layers 999
-      --ctx-size 8192 --batch-size 2048 --ubatch-size 512
+      llama-server \
+        --host 127.0.0.1 --port ${PORT} \
+        --model /models/qwen3-embedding/Qwen3-Embedding-4B-Q6_K.gguf \
+        --alias qwen3-embedding-4b \
+        --embedding --pooling mean --n-gpu-layers 999 \
+        --ctx-size 8192 --batch-size 2048 --ubatch-size 512
     checkEndpoint: /health
     ttl: 0
     aliases: [role/embed]
@@ -148,12 +149,12 @@ models:
     name: BGE Reranker v2 M3
     description: Persistent multilingual cross-encoder reranker.
     cmd: |
-      llama-server
-      --host 127.0.0.1 --port ${PORT}
-      --model /models/bge-reranker/bge-reranker-v2-m3-Q8_0.gguf
-      --alias bge-reranker-v2-m3
-      --reranking --n-gpu-layers 999
-      --ctx-size 8192
+      llama-server \
+        --host 127.0.0.1 --port ${PORT} \
+        --model /models/bge-reranker/bge-reranker-v2-m3-Q8_0.gguf \
+        --alias bge-reranker-v2-m3 \
+        --reranking --n-gpu-layers 999 \
+        --ctx-size 8192
     checkEndpoint: /health
     ttl: 0
     aliases: [role/rerank]
