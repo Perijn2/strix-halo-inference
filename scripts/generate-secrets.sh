@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Author: Perijn
-# Summary: Generates, rotates, or recovers the PostgreSQL credential and records host GPU group IDs.
+# Summary: Generates, rotates, or recovers the PostgreSQL credential, records host GPU group IDs, and restores the runtime Python root and file ownership a wiped .env loses.
 # Usage: Run with no flag for first initialization, --force to rotate a known live credential, or --recover to replace a missing credential without discarding postgres_data.
 # The script never replaces an existing password file until PostgreSQL has accepted the new credential.
 # Recovery never depends on the rest of the stack. Compose interpolates every service before it
@@ -41,11 +41,25 @@ die() {
   exit "${2:-1}"
 }
 
+# A repair run under sudo must not strand what it creates as root-owned: the
+# unprivileged docker compose that follows cannot read a root-owned .env, and the
+# reflex repair (chmod 777) then exposes the deployment config to every local
+# account. Whenever SUDO_* names the invoking user, hand each path back to them.
+hand_to_caller() {
+  [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]] || return 0
+  local path
+  for path in "$@"; do
+    [[ -e "$path" ]] || continue
+    chown "$SUDO_UID:$SUDO_GID" "$path" 2>/dev/null || true
+  done
+}
+
 # A deleted .env is a reason to recover, not a reason to refuse: seed it from the
 # committed example so the repair has somewhere to write the new credential back.
 if [[ ! -f "$env_file" ]]; then
   [[ -f "$root/.env.example" ]] || die "Neither $env_file nor $root/.env.example exists; there is nothing to recover into."
   cp "$root/.env.example" "$env_file"
+  hand_to_caller "$env_file"
   printf '%s\n' "Seeded $env_file from .env.example; review it once the recovery finishes."
 fi
 load_deployment_env "$env_file"
@@ -92,6 +106,7 @@ fi
 # fresh checkout cannot fail halfway and leave the password written elsewhere.
 umask 077
 mkdir -p "$secrets_dir"
+hand_to_caller "$secrets_dir"
 
 new_password() {
   local password=''
@@ -296,6 +311,23 @@ elif [[ ! -e "$postgres_password_file" ]]; then
   first_initialization
 fi
 
+# The router mounts the uv-resolved interpreter prefix at its host path, so the
+# variable must name the real tree. Recovery can re-derive it from an installed
+# runtime with the same resolution scripts/download-models.sh and scripts/
+# validate.sh perform, so a wiped .env does not force an expensive re-download
+# before the stack can start.
+detect_runtime_python_root() {
+  local model_dir="${ORNITH_MODEL_DIR:-}" runtime_root runtime_python candidate
+  [[ -n "$model_dir" ]] || return 1
+  runtime_root="$model_dir/installed-runtime"
+  [[ -x "$runtime_root/venv/bin/python" ]] || return 1
+  runtime_python="$(readlink -f "$runtime_root/venv/bin/python" 2>/dev/null)" || return 1
+  [[ -n "$runtime_python" && -x "$runtime_python" ]] || return 1
+  candidate="$(dirname "$(dirname "$runtime_python")")"
+  [[ -d "$candidate" ]] || return 1
+  printf '%s' "$candidate"
+}
+
 # Only real values are written back. A placeholder exists to satisfy Compose during
 # the repair, never to become the deployment configuration.
 final_overrides="$sandbox/final.env"
@@ -308,12 +340,30 @@ if [[ -n "$video_gid" ]]; then
   printf 'VIDEO_GID=%s\n' "$video_gid" >> "$final_overrides"
 fi
 
+# An empty ORNITH_RUNTIME_PYTHON_ROOT is the difference between a recovered
+# database and a stack that still cannot start: Compose refuses to interpolate
+# the llama-swap mount without it. Re-derive it when the runtime is installed;
+# never overwrite a value the deployment already carries.
+runtime_python_root="${ORNITH_RUNTIME_PYTHON_ROOT:-}"
+if [[ -z "$runtime_python_root" ]]; then
+  runtime_python_root="$(detect_runtime_python_root || true)"
+fi
+if [[ -n "$runtime_python_root" ]]; then
+  printf 'ORNITH_RUNTIME_PYTHON_ROOT=%s\n' "$runtime_python_root" >> "$final_overrides"
+fi
+
 temporary_env="$sandbox/env.new"
 apply_overrides "$env_file" "$temporary_env" "$final_overrides"
 mv "$temporary_env" "$env_file"
 chmod 600 "$env_file" "$postgres_password_file"
+hand_to_caller "$env_file" "$secrets_dir" "$postgres_password_file"
 
 if [[ -z "$render_gid" || -z "$video_gid" ]]; then
   printf '%s\n' 'Warning: RENDER_GID and/or VIDEO_GID are still unset, so the /dev/dri services will not start. Set the host render and video group IDs in .env when this host has them.' >&2
+fi
+if [[ -n "$runtime_python_root" && -z "${ORNITH_RUNTIME_PYTHON_ROOT:-}" ]]; then
+  printf '%s\n' "Re-derived ORNITH_RUNTIME_PYTHON_ROOT=$runtime_python_root from the installed runtime."
+elif [[ -z "$runtime_python_root" ]]; then
+  printf '%s\n' 'Warning: ORNITH_RUNTIME_PYTHON_ROOT is unset and no installed runtime was found under ORNITH_MODEL_DIR/installed-runtime, so the llama-swap router will not start. Run scripts/download-models.sh to provision it.' >&2
 fi
 printf '%s\n' 'Configured the PostgreSQL credential and numeric render/video group IDs.'
