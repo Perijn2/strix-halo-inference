@@ -3,9 +3,10 @@
 # Summary: Generates, rotates, or recovers the PostgreSQL credential and records host GPU group IDs.
 # Usage: Run with no flag for first initialization, --force to rotate a known live credential, or --recover to replace a missing credential without discarding postgres_data.
 # The script never replaces an existing password file until PostgreSQL has accepted the new credential.
-# Recovery creates a temporary Compose environment with real GPU groups and a harmless
-# runtime placeholder, so it can start and repair only postgres even when a partial
-# .env has not yet been completed by scripts/download-models.sh.
+# Recovery never depends on the rest of the stack. Compose interpolates every service before it
+# selects one, so the repair builds a throwaway environment that satisfies each variable
+# compose.yaml requires without a default. A blank or partial .env, a host without the render
+# group, or a model runtime that was never downloaded cannot hold the database repair hostage.
 set -euo pipefail
 
 force=false
@@ -23,167 +24,296 @@ esac
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/load-env.sh
 source "$root/scripts/lib/load-env.sh"
+
 env_file="$root/.env"
+compose_file="${COMPOSE_FILE:-$root/compose.yaml}"
 secrets_dir="$root/secrets"
 postgres_password_file="$secrets_dir/postgres_password"
+sync_script="$root/scripts/sync-postgres-secret.sh"
+
+# Every temporary artifact lives in one directory that leaves with the process, so a
+# failed run cannot strand a half-written .env or a stray credential in the repo.
+sandbox="$(mktemp -d "${TMPDIR:-/tmp}/strix-postgres-recovery.XXXXXX")"
+trap 'rm -rf "$sandbox"' EXIT
+
+die() {
+  printf '%s\n' "$1" >&2
+  exit "${2:-1}"
+}
+
+# A deleted .env is a reason to recover, not a reason to refuse: seed it from the
+# committed example so the repair has somewhere to write the new credential back.
+if [[ ! -f "$env_file" ]]; then
+  [[ -f "$root/.env.example" ]] || die "Neither $env_file nor $root/.env.example exists; there is nothing to recover into."
+  cp "$root/.env.example" "$env_file"
+  printf '%s\n' "Seeded $env_file from .env.example; review it once the recovery finishes."
+fi
 load_deployment_env "$env_file"
 
-command -v openssl >/dev/null || {
-  printf '%s\n' 'openssl is required to generate the PostgreSQL credential.' >&2
-  exit 1
-}
-command -v getent >/dev/null || {
-  printf '%s\n' 'getent is required to resolve host GPU group IDs.' >&2
-  exit 1
-}
-
-render_gid="$(getent group render | awk -F: 'NR == 1 { print $3 }')"
-video_gid="$(getent group video | awk -F: 'NR == 1 { print $3 }')"
-[[ -n "$render_gid" && -n "$video_gid" ]] || {
-  printf '%s\n' 'Host render and video groups are required for /dev/dri access.' >&2
-  exit 1
+# Compose refuses to interpolate a file containing an unsatisfied ${VAR:?...}, and it
+# does that for the whole file rather than for the service being started. Reading the
+# required set from compose.yaml keeps this honest when a service adds a variable;
+# a hard-coded list is how the recovery path dead-locked in the first place.
+required_compose_vars() {
+  awk '{
+    line = $0
+    while (match(line, /\$\{[A-Za-z_][A-Za-z0-9_]*:\?/)) {
+      print substr(line, RSTART + 2, RLENGTH - 4)
+      line = substr(line, RSTART + RLENGTH)
+    }
+  }' "$compose_file" | sort -u
 }
 
+# The host GPU groups belong to the services recovery never starts. Resolve them when
+# the host can offer them and fall back to whatever .env already carries; a missing
+# render group must not be able to block a credential repair.
+render_gid=''
+video_gid=''
+if command -v getent >/dev/null 2>&1; then
+  render_gid="$(getent group render | awk -F: 'NR == 1 { print $3 }')" || render_gid=''
+  video_gid="$(getent group video | awk -F: 'NR == 1 { print $3 }')" || video_gid=''
+fi
+[[ -n "$render_gid" ]] || render_gid="${RENDER_GID:-}"
+[[ -n "$video_gid" ]] || video_gid="${VIDEO_GID:-}"
+
+# Stand-ins for the recovery environment only. Compose rejects a group_add list
+# whose entries are equal, so the two placeholders must never collide even when the
+# host can supply neither group.
+placeholder_render_gid="$render_gid"
+placeholder_video_gid="$video_gid"
+[[ "$placeholder_render_gid" =~ ^[0-9]+$ ]] || placeholder_render_gid="$(id -g 2>/dev/null || printf '0')"
+[[ "$placeholder_render_gid" =~ ^[0-9]+$ ]] || placeholder_render_gid='0'
+[[ "$placeholder_video_gid" =~ ^[0-9]+$ ]] || placeholder_video_gid="$placeholder_render_gid"
+if [[ "$placeholder_render_gid" == "$placeholder_video_gid" ]]; then
+  placeholder_video_gid=$(( (placeholder_render_gid % 65533) + 1 ))
+fi
+
+# The credential directory is created before anything is minted so a first run on a
+# fresh checkout cannot fail halfway and leave the password written elsewhere.
 umask 077
 mkdir -p "$secrets_dir"
 
 new_password() {
-  "$(command -v openssl)" rand -base64 48 | tr -dc 'A-Za-z0-9' | cut -c1-48
+  local password=''
+  if command -v openssl >/dev/null 2>&1; then
+    password="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | cut -c1-48 || true)"
+  fi
+  # A host without openssl, or with one that fails, still gets a real credential
+  # rather than a hard stop in the middle of a recovery.
+  if [[ -z "$password" ]]; then
+    password="$(head -c 96 /dev/urandom 2>/dev/null | base64 2>/dev/null | tr -dc 'A-Za-z0-9' | cut -c1-48 || true)"
+  fi
+  [[ -n "$password" ]] || die 'Password generation produced no entropy; refusing to write a weak credential.'
+  printf '%s' "$password"
 }
 
-rewrite_env() {
-  local destination="${1:?pass destination path}"
-  local secret_path="${2:?pass PostgreSQL secret path}"
-  local runtime_override="${3:-}"
-
-  awk -v postgres_file="$secret_path" -v render_gid="$render_gid" \
-    -v video_gid="$video_gid" -v runtime_override="$runtime_override" '
-    /^POSTGRES_PASSWORD_FILE=/ { print "POSTGRES_PASSWORD_FILE=" postgres_file; found_postgres_file = 1; next }
-    /^RENDER_GID=/ { print "RENDER_GID=" render_gid; found_render_gid = 1; next }
-    /^VIDEO_GID=/ { print "VIDEO_GID=" video_gid; found_video_gid = 1; next }
-    runtime_override != "" && /^ORNITH_RUNTIME_PYTHON_ROOT=/ {
-      print "ORNITH_RUNTIME_PYTHON_ROOT=" runtime_override
-      found_runtime = 1
-      next
+# Rewrites KEY=VALUE lines from a overrides file, appending keys the source lacks.
+# Values are matched on the key only, so a value containing "=" survives intact.
+apply_overrides() {
+  local source_file="${1:?pass the file to read}" destination="${2:?pass the destination}" overrides_file="${3:?pass the KEY=VALUE overrides}"
+  awk -v ovfile="$overrides_file" '
+    BEGIN {
+      count = 0
+      while ((getline line < ovfile) > 0) {
+        if (line == "") continue
+        eq = index(line, "=")
+        if (eq < 2) continue
+        key = substr(line, 1, eq - 1)
+        if (key !~ /^[A-Za-z_][A-Za-z0-9_]*$/) continue
+        count++
+        order[count] = key
+        value[key] = substr(line, eq + 1)
+      }
+      close(ovfile)
     }
-    { print }
-    END {
-      if (!found_postgres_file) print "POSTGRES_PASSWORD_FILE=" postgres_file
-      if (!found_render_gid) print "RENDER_GID=" render_gid
-      if (!found_video_gid) print "VIDEO_GID=" video_gid
-      if (runtime_override != "" && !found_runtime) print "ORNITH_RUNTIME_PYTHON_ROOT=" runtime_override
-    }
-  ' "$env_file" > "$destination"
-}
-
-create_recovery_env() {
-  local secret_path="${1:?pass temporary secret path}"
-  local runtime_placeholder="${ORNITH_RUNTIME_PYTHON_ROOT:-/tmp}"
-  local recovery_env
-
-  recovery_env="$(mktemp "$root/.postgres-recovery.env.XXXXXX")"
-  rewrite_env "$recovery_env" "$secret_path" "$runtime_placeholder"
-  printf '%s' "$recovery_env"
-}
-
-recovery_compose() {
-  local recovery_env="${1:?pass recovery environment path}"
-  shift
-
-  # load_deployment_env exports the incomplete real .env before this function
-  # runs. Docker Compose gives those blank process variables precedence over
-  # --env-file, so remove only the values supplied by the temporary file.
-  env -u RENDER_GID -u VIDEO_GID -u ORNITH_RUNTIME_PYTHON_ROOT \
-    -u POSTGRES_PASSWORD_FILE \
-    docker compose --env-file "$recovery_env" -f "$root/compose.yaml" "$@"
-}
-
-recover_missing_credential() {
-  local password temporary_password recovery_env
-
-  command -v docker >/dev/null || {
-    printf '%s\n' '--recover needs Docker Compose to start and repair postgres.' >&2
-    exit 1
-  }
-
-  password="$(new_password)"
-  temporary_password="$(mktemp "$secrets_dir/.postgres_password.XXXXXX")"
-  printf '%s' "$password" > "$temporary_password"
-  recovery_env="$(create_recovery_env "$temporary_password")"
-
-  if ! recovery_compose "$recovery_env" up -d postgres; then
-    rm -f "$temporary_password" "$recovery_env"
-    printf '%s\n' '--recover could not start postgres with the temporary recovery environment.' >&2
-    exit 1
-  fi
-
-  # The temporary environment makes the just-created secret visible to the
-  # reconciler without persisting a /tmp runtime fallback into the real .env.
-  if ! ENV_FILE="$recovery_env" "$root/scripts/sync-postgres-secret.sh" --no-restart; then
-    rm -f "$temporary_password" "$recovery_env"
-    printf '%s\n' '--recover left the real .env and password file unchanged because PostgreSQL rejected the reconciliation.' >&2
-    exit 1
-  fi
-
-  mv -f "$temporary_password" "$postgres_password_file"
-  rm -f "$recovery_env"
-}
-
-if [[ "$recover" == true ]]; then
-  recover_missing_credential
-elif [[ "$force" == true && -e "$postgres_password_file" ]]; then
-  command -v docker >/dev/null || {
-    printf '%s\n' '--force needs Docker Compose and a running initialized postgres service.' >&2
-    exit 1
-  }
-
-  old_password="$(<"$postgres_password_file")"
-  postgres_user="${POSTGRES_USER:-inference}"
-  postgres_db="${POSTGRES_DB:-inference}"
-  password="$(new_password)"
-  temporary_password="$(mktemp "$secrets_dir/.postgres_password.XXXXXX")"
-  printf '%s' "$password" > "$temporary_password"
-  compose_env="$(create_recovery_env "$postgres_password_file")"
-
-  if ! recovery_compose "$compose_env" ps -q postgres | grep -q .; then
-    rm -f "$temporary_password" "$compose_env"
-    printf '%s\n' '--force refused: start the initialized postgres service before rotating its credential.' >&2
-    exit 1
-  fi
-  if ! recovery_compose "$compose_env" exec -T \
-    -e PGPASSWORD="$old_password" postgres \
-    psql -v ON_ERROR_STOP=1 -U "$postgres_user" -d "$postgres_db" \
-    -v role="$postgres_user" -v new_password="$password" \
-    -c "ALTER ROLE :\"role\" PASSWORD :'new_password';"; then
-    rm -f "$temporary_password" "$compose_env"
-    printf '%s\n' '--force did not change the local secret because PostgreSQL rejected the rotation.' >&2
-    exit 1
-  fi
-  mv -f "$temporary_password" "$postgres_password_file"
-  rm -f "$compose_env"
-elif [[ "$force" == true ]]; then
-  printf '%s\n' '--force requires the existing password file. Use --recover when that file is missing.' >&2
-  exit 1
-elif [[ ! -e "$postgres_password_file" ]]; then
-  # Minting a credential that an already-initialized data directory never adopted
-  # is exactly how a secret file drifts away from the stored verifier. Refuse it
-  # here rather than leave the operator a healthy-looking pg_isready over a database
-  # that rejects every real client.
-  if command -v docker >/dev/null 2>&1 &&
     {
-      docker compose -f "$root/compose.yaml" ps -a -q postgres 2>/dev/null | grep -q . ||
-        docker volume ls --filter name=postgres_data -q 2>/dev/null | grep -q .
-    }; then
+      eq = index($0, "=")
+      if (eq > 1) {
+        key = substr($0, 1, eq - 1)
+        if (key ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && (key in value)) {
+          print key "=" value[key]
+          seen[key] = 1
+          next
+        }
+      }
+      print
+    }
+    END {
+      for (i = 1; i <= count; i++) {
+        if (!(order[i] in seen)) print order[i] "=" value[order[i]]
+      }
+    }
+  ' "$source_file" > "$destination"
+}
+
+# Builds a Compose environment in which every required variable resolves. POSTGRES_PASSWORD_FILE
+# always comes from the caller; every other required variable is stood in for only when it is
+# missing or blank. A stand-in never reaches the real .env: paths point at a throwaway directory
+# and group IDs at the caller's.
+build_compose_env() {
+  local secret_path="${1:?pass the postgres secret to use}" destination="${2:?pass the destination env path}"
+  local overrides="$sandbox/overrides.env" placeholder_dir="$sandbox/placeholder" var current
+  mkdir -p "$placeholder_dir"
+  : > "$overrides"
+  while IFS= read -r var; do
+    # The caller always owns this one. Recovery mints a credential at a temporary
+    # path that .env does not name yet, and the path .env does name is the one that
+    # went missing. Interpolating the stale path would make Compose fail to mount
+    # the secret before postgres exists to be repaired, which is the exact state
+    # --recover is for.
+    if [[ "$var" == POSTGRES_PASSWORD_FILE ]]; then
+      printf '%s=%s\n' "$var" "$secret_path" >> "$overrides"
+      continue
+    fi
+    current="${!var:-}"
+    [[ -n "$current" ]] && continue
+    case "$var" in
+      RENDER_GID) printf '%s=%s\n' "$var" "$placeholder_render_gid" >> "$overrides" ;;
+      VIDEO_GID) printf '%s=%s\n' "$var" "$placeholder_video_gid" >> "$overrides" ;;
+      *) printf '%s=%s\n' "$var" "$placeholder_dir" >> "$overrides" ;;
+    esac
+  done < <(required_compose_vars)
+  apply_overrides "$env_file" "$destination" "$overrides"
+}
+
+# Runs Compose against a throwaway environment. load_deployment_env already exported
+# the real .env into this process, and process variables outrank --env-file, so each
+# variable the temporary file supplies is unset from the process first.
+compose_with() {
+  local env_path="${1:?pass the Compose environment to use}"
+  shift
+  local -a unsets=()
+  while IFS= read -r var; do
+    unsets+=(-u "$var")
+  done < <(required_compose_vars)
+  env ${unsets[@]+"${unsets[@]}"} docker compose --env-file "$env_path" -f "$compose_file" "$@"
+}
+
+require_docker() {
+  command -v docker >/dev/null 2>&1 || die "$1"
+}
+
+postgres_container_exists() {
+  local env_path="${1:?pass the Compose environment}"
+  compose_with "$env_path" ps -a -q postgres 2>/dev/null | grep -q .
+}
+
+postgres_volume_exists() {
+  local env_path="${1:?pass the Compose environment}" project=''
+  project="$(compose_with "$env_path" config --project-name 2>/dev/null || true)"
+  if [[ -z "$project" ]]; then
+    project="$(basename "$root" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+  fi
+  docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "${project}_postgres_data"
+}
+
+# First initialization must not mint a credential over a data directory whose
+# stored verifier is unknown: that is exactly how a secret file drifts away from
+# the ledger and leaves pg_isready reporting healthy over a database that rejects
+# every real client. The probe runs through the throwaway environment so a blank
+# .env cannot make it silently pass, which is how the old guard failed open.
+first_initialization() {
+  local password temporary_password probe_env
+  password="$(new_password)"
+  temporary_password="$sandbox/postgres_password"
+  printf '%s' "$password" > "$temporary_password"
+  chmod 600 "$temporary_password"
+  probe_env="$sandbox/probe.env"
+  build_compose_env "$temporary_password" "$probe_env"
+
+  if command -v docker >/dev/null 2>&1 &&
+    { postgres_container_exists "$probe_env" || postgres_volume_exists "$probe_env"; }; then
     printf '%s\n' 'Refusing to mint a new credential: a postgres container or postgres_data volume already exists here, and its stored verifier is unknown to the missing secret file.' >&2
     printf '%s\n' 'Run scripts/generate-secrets.sh --recover to create a new credential and reconcile it without discarding the audit ledger.' >&2
     exit 1
   fi
+  mv -f "$temporary_password" "$postgres_password_file"
+}
+
+# Recovery repairs the live role through the container's trusted local socket, so it
+# needs no prior credential, and it never recreates the data directory. The new
+# password is only promoted once the network probe accepts it, which is the same
+# scram path every consuming service uses.
+recover_missing_credential() {
+  require_docker '--recover needs Docker Compose to start and repair postgres.'
+
+  local password temporary_password recovery_env
   password="$(new_password)"
-  printf '%s' "$password" > "$postgres_password_file"
+  temporary_password="$sandbox/postgres_password"
+  printf '%s' "$password" > "$temporary_password"
+  chmod 600 "$temporary_password"
+  recovery_env="$sandbox/recovery.env"
+  build_compose_env "$temporary_password" "$recovery_env"
+
+  if ! postgres_container_exists "$recovery_env" && ! postgres_volume_exists "$recovery_env"; then
+    printf '%s\n' 'Note: no postgres container or postgres_data volume was found here, so this initializes a fresh database.'
+  fi
+
+  if ! compose_with "$recovery_env" up -d postgres; then
+    die '--recover could not start postgres with the temporary recovery environment.'
+  fi
+
+  if ! ENV_FILE="$recovery_env" COMPOSE_FILE="$compose_file" bash "$sync_script" --no-restart; then
+    die '--recover left the real .env and password file unchanged because PostgreSQL rejected the reconciliation.'
+  fi
+
+  mv -f "$temporary_password" "$postgres_password_file"
+}
+
+rotate_live_credential() {
+  require_docker '--force needs Docker Compose and a running initialized postgres service.'
+  [[ -e "$postgres_password_file" ]] || die '--force requires the existing password file. Use --recover when that file is missing.'
+
+  local old_password password temporary_password compose_env
+  old_password="$(<"$postgres_password_file")"
+  postgres_user="${POSTGRES_USER:-inference}"
+  postgres_db="${POSTGRES_DB:-inference}"
+  password="$(new_password)"
+  temporary_password="$sandbox/postgres_password"
+  printf '%s' "$password" > "$temporary_password"
+  chmod 600 "$temporary_password"
+  compose_env="$sandbox/rotate.env"
+  build_compose_env "$postgres_password_file" "$compose_env"
+
+  if ! compose_with "$compose_env" ps -q postgres | grep -q .; then
+    die '--force refused: start the initialized postgres service before rotating its credential.'
+  fi
+  if ! compose_with "$compose_env" exec -T \
+    -e PGPASSWORD="$old_password" postgres \
+    psql -v ON_ERROR_STOP=1 -U "$postgres_user" -d "$postgres_db" \
+    -v role="$postgres_user" -v new_password="$password" \
+    -c "ALTER ROLE :\"role\" PASSWORD :'new_password';"; then
+    die '--force did not change the local secret because PostgreSQL rejected the rotation.'
+  fi
+  mv -f "$temporary_password" "$postgres_password_file"
+}
+
+if [[ "$recover" == true ]]; then
+  recover_missing_credential
+elif [[ "$force" == true ]]; then
+  rotate_live_credential
+elif [[ ! -e "$postgres_password_file" ]]; then
+  first_initialization
 fi
 
-temporary_env="$(mktemp "$root/.env.XXXXXX")"
-rewrite_env "$temporary_env" "$postgres_password_file"
+# Only real values are written back. A placeholder exists to satisfy Compose during
+# the repair, never to become the deployment configuration.
+final_overrides="$sandbox/final.env"
+: > "$final_overrides"
+printf 'POSTGRES_PASSWORD_FILE=%s\n' "$postgres_password_file" >> "$final_overrides"
+if [[ -n "$render_gid" ]]; then
+  printf 'RENDER_GID=%s\n' "$render_gid" >> "$final_overrides"
+fi
+if [[ -n "$video_gid" ]]; then
+  printf 'VIDEO_GID=%s\n' "$video_gid" >> "$final_overrides"
+fi
+
+temporary_env="$sandbox/env.new"
+apply_overrides "$env_file" "$temporary_env" "$final_overrides"
 mv "$temporary_env" "$env_file"
 chmod 600 "$env_file" "$postgres_password_file"
+
+if [[ -z "$render_gid" || -z "$video_gid" ]]; then
+  printf '%s\n' 'Warning: RENDER_GID and/or VIDEO_GID are still unset, so the /dev/dri services will not start. Set the host render and video group IDs in .env when this host has them.' >&2
+fi
 printf '%s\n' 'Configured the PostgreSQL credential and numeric render/video group IDs.'
