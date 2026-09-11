@@ -42,6 +42,12 @@ if ! test -x "$runtime_root/venv/bin/python"; then
   printf 'Incomplete Ciru runtime: missing venv Python under %s\n' "$runtime_root" >&2
   exit 1
 fi
+runtime_vllm_init="$("$runtime_root/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/vllm/__init__.py"
+if ! test -f "$runtime_vllm_init"; then
+  printf 'Incomplete Ciru runtime: missing vendor vLLM at %s\n' "$runtime_vllm_init" >&2
+  printf 'Move aside %s and rerun runtime/INSTALL-ORNITH-RUNTIME.sh.\n' "$runtime_root" >&2
+  exit 1
+fi
 
 # uv creates the virtual environment's Python as an absolute symlink. Record
 # its interpreter prefix so Compose can mount it at the same path in the router.

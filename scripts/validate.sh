@@ -26,6 +26,11 @@ test -x "$ORNITH_MODEL_DIR/installed-runtime/venv/bin/python" || {
   printf 'Missing pinned Ciru runtime Python: run scripts/download-models.sh\n' >&2
   exit 1
 }
+runtime_vllm_init="$("$ORNITH_MODEL_DIR/installed-runtime/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/vllm/__init__.py"
+test -f "$runtime_vllm_init" || {
+  printf 'Incomplete Ciru runtime: missing vendor vLLM at %s\n' "$runtime_vllm_init" >&2
+  exit 1
+}
 test -f "$ORNITH_MODEL_DIR/installed-runtime/runtime-env.sh" || {
   printf 'Incomplete Ciru runtime: missing installed-runtime/runtime-env.sh; run scripts/download-models.sh\n' >&2
   exit 1
