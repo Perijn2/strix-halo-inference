@@ -31,7 +31,7 @@ Reliable Docker Compose inference for a dedicated Ryzen AI Max+ 395 / Radeon 806
 | `role/rerank` | BGE reranker v2-m3 |
 | `role/ocr` | Four-engine validated OCR |
 
-llama-swap preloads Qwen, Ciru Ornith, embedding, and reranking together at startup, without routing profiles or a swap matrix. OCR is a separate, always-on, memory-capped sidecar; llama-swap owns only its local supervised forwarder and stable `role/ocr` ID. All llama-swap children use `ttl: 0` and stay loaded until an explicit unload action. The deployed Ciru configuration limits each session to 131K tokens and admits up to six active agent sessions, while retaining its shared 44 GiB KV/state pool; provision the release's documented whole-host memory budget before enabling it.
+llama-swap starts Qwen and Ciru Ornith lazily, without routing profiles or a swap matrix. OCR is a separate, always-on, memory-capped sidecar; llama-swap owns only its local supervised forwarder and stable `role/ocr` ID. All llama-swap children use `ttl: 0` and stay loaded until an explicit unload action. Ornith uses its vendor-required IU4 `agents64k` profile: 262K maximum model length, eight sequences, and a 44 GiB KV/state pool. It targets 80% of the 96 GiB GPU memory, so unload Qwen and other GPU workloads before loading Ornith on this host.
 
 ## Start
 
@@ -82,7 +82,7 @@ The old `Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf` llama.cpp process is n
 
 ## Qwen lifecycle
 
-llama-swap owns and preloads the Halogen process beside Ciru Ornith, waiting for each model's `/health` endpoint before reporting startup ready. Cold loading can take minutes. Qwen remains loaded until explicitly removed:
+llama-swap starts Halogen on its first Qwen request and waits for its `/health` endpoint. Cold loading can take minutes. Qwen remains loaded until explicitly removed:
 
 ```bash
 curl \

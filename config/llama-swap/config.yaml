@@ -1,6 +1,6 @@
 # Author: Perijn
-# Summary: Keeps every Strix Halo inference model concurrently available and exposes role-specific model IDs without runtime profile switching.
-# Usage: Caddy forwards API requests to llama-swap. llama-swap preloads every model and retains it until explicitly unloaded.
+# Summary: Routes Strix Halo inference models through stable role-specific IDs without runtime profile switching.
+# Usage: Caddy forwards API requests to llama-swap. Models start on their first request and remain until explicitly unloaded.
 apiKeys: []
 
 globalTTL: 0
@@ -74,10 +74,9 @@ models:
     # release includes its pinned runtime, custom kernels, DFlash2 drafter, and
     # launcher; preserve its supplied serving configuration.
     cmd: |
-      # Override the release defaults: reserve 131K tokens for each session and
-      # admit at most six concurrent agent sessions during initial deployment.
-      bash /ornith/bundle/serve.sh --host 127.0.0.1 --port ${PORT} \
-        --context 131072 --max-seqs 6
+      # IU4 prefill requires the release's coupled agents64k configuration.
+      # Do not override its context, cache, or sequence settings here.
+      bash /ornith/bundle/serve.sh --host 127.0.0.1 --port ${PORT}
     checkEndpoint: /health
     ttl: 0
     aliases: [ornith-1.5-35b-a3b]
@@ -85,12 +84,12 @@ models:
       in: [text]
       out: [text]
       tools: true
-      context: 131072
+      context: 262144
     metadata:
       reasoning: true
       runtime: ciru-vllm-rocm
       served_model: ciru-halo-agent
-      max_sequences: 6
+      max_sequences: 8
       shared_kv_state_pool_gib: 44
     filters:
       setParams:
