@@ -51,5 +51,5 @@ RUN useradd --create-home --uid 10001 ocr \
 # One worker only. Multiple workers would each hold a full copy of every model and
 # blow through the Compose memory cap immediately.
 EXPOSE 8090
-ENTRYPOINT ["/usr/local/bin/ocr-entrypoint"]
+ENTRYPOINT ["python", "/usr/local/bin/ocr-entrypoint"]
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1"]
