@@ -60,7 +60,7 @@ paddle/PP-OCRv5_mobile_det/  # complete PaddleOCR detector repository
 paddle/PP-OCRv5_mobile_rec/  # complete PaddleOCR recognizer repository
 ```
 
-`HALOGEN_MODELS_DIR` is the flat model directory downloaded from the Halogen Qwen repository; it contains the `.hgn` checkpoint, quality overlay, and `tokenizer/` directory. `ORNITH_MODEL_DIR` must contain the complete [jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo](https://huggingface.co/jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo) release, including `bundle/`, `runtime/`, and `installed-runtime/`. The included `INSTALL-ORNITH-RUNTIME.sh` creates `installed-runtime/`; its pinned vLLM/ROCm runtime and custom kernels are required—stock vLLM and the prior llama.cpp GGUF are incompatible.
+`HALOGEN_MODELS_DIR` is the flat model directory downloaded from the Halogen Qwen repository; it contains the `.hgn` checkpoint, quality overlay, and `tokenizer/` directory. `ORNITH_MODEL_DIR` must contain the complete [jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo](https://huggingface.co/jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo) release, including `bundle/`, `runtime/`, and `installed-runtime/`. The included installer creates `installed-runtime/runtime-env.sh`; `scripts/download-models.sh` also records the uv interpreter root in `ORNITH_RUNTIME_PYTHON_ROOT` so Compose can make its absolute venv symlink available to the container. Its pinned vLLM/ROCm runtime and custom kernels are required—stock vLLM and the prior llama.cpp GGUF are incompatible.
 
 Use [`scripts/download-models.sh`](scripts/download-models.sh) to fetch the complete Ciru release, install its pinned runtime, and fetch retrieval/OCR artifacts. Run it on the Linux Strix Halo host with sufficient disk space and memory; the published Ciru profile reports a 95.35 GiB peak whole-host measurement. Read [docs/operations.md](docs/operations.md) before operating Halogen.
 
@@ -78,7 +78,7 @@ After `docker compose up -d --build`, open `http://<server-lan-ip>:8080/ocr-play
 
 ## Ciru Ornith lifecycle
 
-The old `Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf` llama.cpp process is no longer used. llama-swap preloads the Ciru launcher from `/ornith/bundle/serve.sh` beside Qwen, preserving its custom quantization, native kernels, DFlash2 drafter, prefix cache, and OpenAI-compatible tool calling. `role/implementer`, `role/tester`, and `role/documenter` reuse that loaded Ciru process.
+The old `Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf` llama.cpp process is no longer used. llama-swap starts the Ciru launcher from `/ornith/bundle/serve.sh` on its first request, preserving its custom quantization, native kernels, DFlash2 drafter, prefix cache, and OpenAI-compatible tool calling. After it loads, `ttl: 0` keeps it resident beside Qwen until an explicit unload; `role/implementer`, `role/tester`, and `role/documenter` reuse that process.
 
 ## Qwen lifecycle
 

@@ -6,24 +6,19 @@ apiKeys: []
 globalTTL: 0
 unloadTimeout: 60
 
-hooks:
-  on_startup:
-    preload:
-      - qwen3.8-flash-next
-      - ciru-ornith-1.5-halo-agent
-      - qwen3-embedding-4b
-      - bge-reranker-v2-m3
+# Models start lazily on their first request. Individual ``ttl: 0`` settings
+# keep successfully loaded models resident until an explicit unload request.
 
 # No routing profiles, groups, or swap matrix are configured. llama-swap may
-# therefore keep every child resident simultaneously; startup preloads Qwen and
-# Ornith together, while ttl: 0 prevents either from being evicted by idleness.
+# therefore keep every child resident simultaneously after lazy first-request
+# startup, while ttl: 0 prevents either from being evicted by idleness.
 
 models:
   qwen3.8-flash-next:
     name: Qwen3.8 Flash Next
     description: Halogen-managed orchestrator, architect, planner, and reviewer model.
     cmd: |
-      HALOGEN_API_PORT=${PORT} halogen-launch all
+      env HALOGEN_API_PORT=${PORT} halogen-launch all
     checkEndpoint: /health
     ttl: 0
     capabilities:

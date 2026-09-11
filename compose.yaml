@@ -52,6 +52,9 @@ services:
       - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
       - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
       - ${HALOGEN_MODELS_DIR:?set HALOGEN_MODELS_DIR in .env}:/halogen-models:ro
+      # uv-backed Ciru venvs use an absolute interpreter symlink; preserve that
+      # target path in the container without exposing the rest of the host home.
+      - ${ORNITH_RUNTIME_PYTHON_ROOT:?run scripts/download-models.sh to set ORNITH_RUNTIME_PYTHON_ROOT}:${ORNITH_RUNTIME_PYTHON_ROOT}:ro
       # Ciru builds GPU/runtime artifacts here on first start; keep release files immutable.
       - ornith_cache:/ornith/bundle/cache
     devices:
