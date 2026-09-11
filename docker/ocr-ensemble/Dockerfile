@@ -38,15 +38,18 @@ COPY docker/ocr-ensemble/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY docker/ocr-ensemble/app/ /app/app
+COPY docker/ocr-ensemble/scripts/ocr-entrypoint.py /usr/local/bin/ocr-entrypoint
 
-# Runs as a non-root user. Model weights are mounted read-only at /models. The
-# pre-owned /audit-data directory seeds the named volume with writable ownership.
+# The entrypoint starts as root only to copy the root-only Compose secret, then
+# drops to this account before it execs Uvicorn. Model weights are read-only and
+# the pre-owned audit directory seeds its named volume with writable ownership.
 RUN useradd --create-home --uid 10001 ocr \
     && mkdir -p /audit-data \
-    && chown -R ocr:ocr /app /audit-data
-USER ocr
+    && chown -R ocr:ocr /app /audit-data \
+    && chmod 0755 /usr/local/bin/ocr-entrypoint
 
 # One worker only. Multiple workers would each hold a full copy of every model and
 # blow through the Compose memory cap immediately.
 EXPOSE 8090
+ENTRYPOINT ["python", "/usr/local/bin/ocr-entrypoint"]
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1"]
