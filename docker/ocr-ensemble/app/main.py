@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import logging
 import math
 import os
 import threading
@@ -30,6 +31,13 @@ from pydantic import BaseModel, Field
 from .engines import EngineResult, build_engines
 from .fusion import FusionConfig, FusionEngine, FusionResult
 from .storage import AuditStore
+
+# Engine outcomes and failures must reach the container log, not only the
+# /health body. Uvicorn configures its own loggers and leaves the root alone,
+# so a plain basicConfig here owns application-level logging.
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+)
 
 _run_lock = threading.Lock()
 _ENGINES = build_engines()
@@ -122,6 +130,21 @@ def initialize_storage() -> None:
             f"it initializes an empty data directory, so run "
             f"scripts/sync-postgres-secret.sh on the host if it changed: {exc}"
         ) from exc
+
+
+@app.on_event("startup")
+def prewarm_engines() -> None:
+    """Load every engine before the port opens to traffic.
+
+    Engine loads used to be triggered lazily by the first health probe: MinerU's
+    multi-minute load held one engine lock while every concurrent probe piled up
+    behind it, so the remaining engines could not even report their own state
+    and the readiness answer stayed opaque for the whole window. Prewarming
+    makes the first probe after startup deterministic: each engine is already
+    loaded, or has logged and cached a precise failure reason.
+    """
+    for engine in _ENGINES:
+        _ = engine.available  # noqa: B018 - property access performs the isolated load.
 
 
 def _decode_base64(payload: str, label: str) -> bytes:
