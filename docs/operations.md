@@ -24,7 +24,7 @@ Use a distinct Compose project name and unused gateway port for a test stack, fo
 
 Halogen uses two 131K-context slots and a 262K shared KV pool. `HALOGEN_HOST_RESERVE_GIB` is intentionally set to 28 GiB, leaving headroom for the persistent embedding and reranker workloads. Do not raise slots, context, or pool size without a fresh load and concurrency benchmark.
 
-Qwen and Ciru Ornith start lazily on their first matching request, with no routing profiles, groups, or swap matrix. Each has `ttl: 0`, so successfully loaded models remain resident together until explicitly unloaded. Halogen and the Ciru runtime can take minutes to load. Ciru is configured for 131K-token sessions and no more than six active agent sessions, with a 44 GiB shared KV/state pool. Its published deployment measured a 95.35 GiB whole-host peak; measure coexistence with Qwen and OCR before production use.
+Qwen and Ciru Ornith start lazily on their first matching request, with no routing profiles, groups, or swap matrix. Each has `ttl: 0`, so a successfully loaded model remains resident until explicitly unloaded. Halogen and the Ciru runtime can take minutes to load. The vendor-required Ornith IU4 profile uses a 262K maximum model length, eight sequences, and a 44 GiB shared KV/state pool; it targets 80% of the 96 GiB GPU memory. Unload Qwen and other GPU workloads before loading Ornith on this host. Its published deployment measured a 95.35 GiB whole-host peak; do not run its full profile beside other large GPU models.
 
 ## Halogen PP/TG telemetry
 
