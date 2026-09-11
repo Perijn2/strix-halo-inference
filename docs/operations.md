@@ -70,6 +70,9 @@ No llama-swap profiles, groups, or swap matrix restrict the configured Qwen, Cir
 
 llama-swap kills a child whose `checkEndpoint` never turns ready within `healthCheckTimeout` (default 120 s, minimum 15 s). Ciru Ornith's first load exceeds that window: its pinned `torch.compile`, a ~53 s profiling/warmup run, and CUDA-graph capture together take several minutes before `/health` reports ready. The signature is the engine log halting mid `Capturing CUDA graphs (decode, FULL)` with no Python traceback while the router restarts the child in a loop; a roughly fixed ~2-minute time-of-death means the startup timeout fired, not an out-of-memory kill. The Ciru model therefore sets `healthCheckTimeout: 900`. Once the AOT compile and warm caches exist in the `ornith_cache` volume reloads are much faster, but keep the extended budget so a cold cache after a fresh volume, a runtime/kernel update, or `docker compose down -v` still has room to finish. If you change the capture or warmup profile, keep this comfortably above the measured cold-load wall-clock time.
 
+### Profile commands run without a shell
+
+llama-swap shlex-splits a profile `cmd`, discards `#` lines, and execs `argv[0]` itself; it never spawns a shell. A leading `exec` is therefore looked up as a program literally named `exec` and the child dies with `exec: "exec": executable file not found in $PATH`, which is how the OCR forwarder was failing. The same applies to every other shell construct: `&&`, `||`, pipes, globs, and `$VAR` expansions are arguments rather than syntax. Only llama-swap's own substitution (`${PORT}`, macros) is applied. Write each profile command as one executable plus plain arguments; comment lines remain safe because they are stripped before splitting, which is why the Ciru `serve.sh` profile's comments do not break it.
 ## Update policy
 
 Pin and validate any production image digest after a successful soak test. Test llama.cpp fork updates with the PP512, PP2048, TG64, 64K-context, retrieval, OCR image request, review-verdict, and restart measurements before replacing the current image.
@@ -81,3 +84,16 @@ The OCR `requirements.txt` intentionally uses constrained version ranges until o
 PostgreSQL starts by default. It is the durable OCR audit ledger and may also store RAG vectors/metadata; it does not participate in model routing. Original sources and rendered pages reside in the private `ocr_audit_data` Docker volume, while PostgreSQL stores document metadata and page audit JSON. The default durable endpoint limits sources to 24 MiB, PDFs to 100 pages, rendered pages to 40 million pixels each, and total retained artifacts to 2 GiB (`OCR_MAX_*` and `OCR_AUDIT_MAX_BYTES`). On every document submission, the ensemble removes records and artifact directories whose expiry has passed, then reconciles UUID artifact directories against live ledger IDs to clean any crash-orphaned data. `OCR_AUDIT_RETENTION_DAYS` defaults to 90; change it only with an explicit retention-policy decision.
 
 Back up both PostgreSQL and the `ocr_audit_data` volume together if audit traceability matters. The browser workspace and unauthenticated Caddy listener expose retained source documents to anyone with network access to the stack; restrict that access before uploading sensitive files.
+
+### Credential drift and repair
+
+The Postgres image applies `POSTGRES_PASSWORD_FILE` only while it initializes an empty data directory. Replacing, restoring, or reissuing the secret after that first init never reaches the stored verifier, so the file and the volume silently disagree. `pg_isready` cannot see this—it authenticates nothing—so Compose keeps reporting the database healthy while `ocr-ensemble` crash-loops at startup with `FATAL: password authentication failed for user "inference"` and the playground's every request 499s behind it.
+
+Make the live role agree with the file instead of recreating the volume, which would destroy the ledger:
+
+```bash
+./scripts/sync-postgres-secret.sh --dry-run   # report drift only, change nothing
+./scripts/sync-postgres-secret.sh            # reconcile in place and converge ocr-ensemble
+```
+
+The script needs no prior credential because the image leaves `local all all trust` inside its own container, and it verifies through the container's own network address so it exercises the same `scram-sha-256` path the ensemble uses rather than the trusted loopback path. `scripts/generate-secrets.sh --force` stays the rotation path for as long as the current credential still authenticates; once it no longer does, this script is the only non-destructive repair.

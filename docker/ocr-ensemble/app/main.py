@@ -107,8 +107,21 @@ class DocumentResponse(BaseModel):
 
 @app.on_event("startup")
 def initialize_storage() -> None:
-    """Ensure audit storage exists before accepting source documents."""
-    _STORE.initialize()
+    """Ensure audit storage exists before accepting source documents.
+
+    A connection failure is re-raised carrying the exact identity the store used,
+    so the container log names the host, database, role, and secret path instead
+    of a bare driver message. Only the secret path is printed, never its value.
+    """
+    try:
+        _STORE.initialize()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Audit ledger unreachable as {_STORE.user}@{_STORE.host}/{_STORE.database} "
+            f"using secret {_STORE.password_file}; Postgres adopts that file only while "
+            f"it initializes an empty data directory, so run "
+            f"scripts/sync-postgres-secret.sh on the host if it changed: {exc}"
+        ) from exc
 
 
 def _decode_base64(payload: str, label: str) -> bytes:
