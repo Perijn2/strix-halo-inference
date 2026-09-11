@@ -86,6 +86,18 @@ create_recovery_env() {
   printf '%s' "$recovery_env"
 }
 
+recovery_compose() {
+  local recovery_env="${1:?pass recovery environment path}"
+  shift
+
+  # load_deployment_env exports the incomplete real .env before this function
+  # runs. Docker Compose gives those blank process variables precedence over
+  # --env-file, so remove only the values supplied by the temporary file.
+  env -u RENDER_GID -u VIDEO_GID -u ORNITH_RUNTIME_PYTHON_ROOT \
+    -u POSTGRES_PASSWORD_FILE \
+    docker compose --env-file "$recovery_env" -f "$root/compose.yaml" "$@"
+}
+
 recover_missing_credential() {
   local password temporary_password recovery_env
 
@@ -99,7 +111,7 @@ recover_missing_credential() {
   printf '%s' "$password" > "$temporary_password"
   recovery_env="$(create_recovery_env "$temporary_password")"
 
-  if ! docker compose --env-file "$recovery_env" -f "$root/compose.yaml" up -d postgres; then
+  if ! recovery_compose "$recovery_env" up -d postgres; then
     rm -f "$temporary_password" "$recovery_env"
     printf '%s\n' '--recover could not start postgres with the temporary recovery environment.' >&2
     exit 1
@@ -133,12 +145,12 @@ elif [[ "$force" == true && -e "$postgres_password_file" ]]; then
   printf '%s' "$password" > "$temporary_password"
   compose_env="$(create_recovery_env "$postgres_password_file")"
 
-  if ! docker compose --env-file "$compose_env" -f "$root/compose.yaml" ps -q postgres | grep -q .; then
+  if ! recovery_compose "$compose_env" ps -q postgres | grep -q .; then
     rm -f "$temporary_password" "$compose_env"
     printf '%s\n' '--force refused: start the initialized postgres service before rotating its credential.' >&2
     exit 1
   fi
-  if ! docker compose --env-file "$compose_env" -f "$root/compose.yaml" exec -T \
+  if ! recovery_compose "$compose_env" exec -T \
     -e PGPASSWORD="$old_password" postgres \
     psql -v ON_ERROR_STOP=1 -U "$postgres_user" -d "$postgres_db" \
     -v role="$postgres_user" -v new_password="$password" \
