@@ -96,4 +96,10 @@ Make the live role agree with the file instead of recreating the volume, which w
 ./scripts/sync-postgres-secret.sh            # reconcile in place and converge ocr-ensemble
 ```
 
-The script needs no prior credential because the image leaves `local all all trust` inside its own container, and it verifies through the container's own network address so it exercises the same `scram-sha-256` path the ensemble uses rather than the trusted loopback path. `scripts/generate-secrets.sh --force` stays the rotation path for as long as the current credential still authenticates; once it no longer does, this script is the only non-destructive repair.
+The script needs no prior credential because the image leaves `local all all trust` inside its own container, and it verifies through the container's own network address so it exercises the same `scram-sha-256` path the ensemble uses rather than the trusted loopback path. `scripts/generate-secrets.sh --force` stays the rotation path for as long as the current credential file still authenticates. If that file is missing, use the non-destructive bootstrap instead:
+
+```bash
+./scripts/generate-secrets.sh --recover
+```
+
+Recovery creates a replacement under `secrets/`, starts only postgres with a temporary Compose environment containing the real GPU group IDs and a runtime interpolation placeholder, reconciles the role, and then updates the real `.env`. It neither persists the placeholder nor removes `postgres_data`; run `scripts/download-models.sh` if the runtime is still absent, then run `docker compose up -d`. Do not use `docker compose down -v` unless the ledger is deliberately disposable.

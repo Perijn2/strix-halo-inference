@@ -44,7 +44,7 @@ docker compose up -d
 # Caddy is HTTP-only for LAN use; restrict its unauthenticated port with a host firewall.
 ```
 
-`scripts/generate-secrets.sh` writes the PostgreSQL password to the ignored `secrets/` directory and records numeric host `render`/`video` group IDs in `.env`. With an existing credential, `--force` performs a live `ALTER ROLE` through the running PostgreSQL service before atomically replacing the local secret; restart dependent services after it succeeds.
+`scripts/generate-secrets.sh` writes the PostgreSQL password to the ignored `secrets/` directory and records numeric host `render`/`video` group IDs in `.env`. With an existing credential, `--force` performs a live `ALTER ROLE` through the running PostgreSQL service before atomically replacing the local secret. If that file was lost while `postgres_data` still exists, run `./scripts/generate-secrets.sh --recover`: it creates a replacement and reconciles the live role without deleting the audit ledger, even if `.env` is still missing its GPU-group or Ornith-runtime interpolation values.
 
 ## Model files
 
