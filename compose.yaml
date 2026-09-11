@@ -52,6 +52,8 @@ services:
       - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
       - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
       - ${HALOGEN_MODELS_DIR:?set HALOGEN_MODELS_DIR in .env}:/halogen-models:ro
+      # The complete vendor release includes the launcher, runtime, kernels, and weights.
+      - ${ORNITH_MODEL_DIR:?set ORNITH_MODEL_DIR in .env}:/ornith:ro
       # uv-backed Ciru venvs use an absolute interpreter symlink; preserve that
       # target path in the container without exposing the rest of the host home.
       - ${ORNITH_RUNTIME_PYTHON_ROOT:?run scripts/download-models.sh to set ORNITH_RUNTIME_PYTHON_ROOT}:${ORNITH_RUNTIME_PYTHON_ROOT}:ro
