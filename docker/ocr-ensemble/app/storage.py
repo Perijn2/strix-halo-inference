@@ -11,9 +11,9 @@ both the database row and its corresponding directory.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 _SCHEMA = """
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -55,6 +56,10 @@ class AuditStore:
                 "OCR_AUDIT_DB_PASSWORD_FILE", "/run/secrets/postgres_password"
             )
         )
+        self.max_artifact_bytes = int(
+            os.environ.get("OCR_AUDIT_MAX_BYTES", str(2 * 1024 * 1024 * 1024))
+        )
+        self._artifact_lock = threading.Lock()
 
     def initialize(self) -> None:
         """Create storage directories and ensure the ledger schema exists."""
@@ -96,49 +101,56 @@ class AuditStore:
         """
         if len(pages) != len(audits):
             raise ValueError("each rendered page must have exactly one audit")
-        self.cleanup_expired()
-        directory = self.root / str(document_id)
-        try:
-            directory.mkdir(parents=True, exist_ok=False)
-            source_path = directory / "source"
-            source_path.write_bytes(source)
-            page_paths = []
-            for number, page in enumerate(pages, start=1):
-                path = directory / f"page-{number:04d}.png"
-                path.write_bytes(page)
-                page_paths.append(path)
-            expires_at = datetime.now(UTC) + timedelta(days=self.retention_days)
-            with self._connect() as connection, connection.cursor() as cursor:
-                cursor.execute(
-                    """INSERT INTO ocr_documents
-                       (id, filename, media_type, source_path, page_count, expires_at)
-                       VALUES (%s, %s, %s, %s, %s, %s)""",
-                    (
-                        document_id,
-                        filename,
-                        media_type,
-                        str(source_path),
-                        len(page_paths),
-                        expires_at,
-                    ),
+        prospective_bytes = len(source) + sum(len(page) for page in pages)
+        with self._artifact_lock:
+            self.cleanup_expired()
+            if self._artifact_bytes() + prospective_bytes > self.max_artifact_bytes:
+                raise ValueError(
+                    "OCR audit artifact quota would be exceeded; remove expired "
+                    "documents or increase OCR_AUDIT_MAX_BYTES"
                 )
-                for page_number, (page_path, audit) in enumerate(
-                    zip(page_paths, audits, strict=True), start=1
-                ):
+            directory = self.root / str(document_id)
+            try:
+                directory.mkdir(parents=True, exist_ok=False)
+                source_path = directory / "source"
+                source_path.write_bytes(source)
+                page_paths = []
+                for number, page in enumerate(pages, start=1):
+                    path = directory / f"page-{number:04d}.png"
+                    path.write_bytes(page)
+                    page_paths.append(path)
+                expires_at = datetime.now(UTC) + timedelta(days=self.retention_days)
+                with self._connect() as connection, connection.cursor() as cursor:
                     cursor.execute(
-                        """INSERT INTO ocr_pages (id, document_id, page_number, image_path, audit)
-                           VALUES (%s, %s, %s, %s, %s)""",
+                        """INSERT INTO ocr_documents
+                           (id, filename, media_type, source_path, page_count, expires_at)
+                           VALUES (%s, %s, %s, %s, %s, %s)""",
                         (
-                            uuid4(),
                             document_id,
-                            page_number,
-                            str(page_path),
-                            json.dumps(audit),
+                            filename,
+                            media_type,
+                            str(source_path),
+                            len(page_paths),
+                            expires_at,
                         ),
                     )
-        except Exception:
-            shutil.rmtree(directory, ignore_errors=True)
-            raise
+                    for page_number, (page_path, audit) in enumerate(
+                        zip(page_paths, audits, strict=True), start=1
+                    ):
+                        cursor.execute(
+                            """INSERT INTO ocr_pages (id, document_id, page_number, image_path, audit)
+                               VALUES (%s, %s, %s, %s, %s)""",
+                            (
+                                uuid4(),
+                                document_id,
+                                page_number,
+                                str(page_path),
+                                Jsonb(audit),
+                            ),
+                        )
+            except Exception:
+                shutil.rmtree(directory, ignore_errors=True)
+                raise
 
     def list_documents(self, limit: int = 100) -> list[dict[str, Any]]:
         """Return recent, unexpired document summaries in newest-first order."""
@@ -204,7 +216,40 @@ class AuditStore:
             expired = list(cursor.fetchall())
         for row in expired:
             shutil.rmtree(self.root / str(row["id"]), ignore_errors=True)
+        self._reconcile_orphaned_artifacts()
         return len(expired)
+
+    def _reconcile_orphaned_artifacts(self) -> None:
+        """Remove UUID artifact directories that no longer have a ledger row.
+
+        A crash after PostgreSQL commits an expiry delete but before ``rmtree``
+        leaves otherwise-undiscoverable data. Reconciliation on subsequent cleanup
+        closes that storage-leak window without touching non-document files.
+        """
+        if not self.root.is_dir():
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT id::text FROM ocr_documents")
+            live_ids = {row[0] for row in cursor.fetchall()}
+        for directory in self.root.iterdir():
+            if not directory.is_dir():
+                continue
+            try:
+                UUID(directory.name)
+            except ValueError:
+                continue
+            if directory.name not in live_ids:
+                shutil.rmtree(directory, ignore_errors=True)
+
+    def _artifact_bytes(self) -> int:
+        """Return the current retained artifact size without following symlinks."""
+        if not self.root.is_dir():
+            return 0
+        return sum(
+            path.stat().st_size
+            for path in self.root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        )
 
     def _connect(self) -> psycopg.Connection[Any]:
         """Connect with the Docker secret rather than a password environment variable."""

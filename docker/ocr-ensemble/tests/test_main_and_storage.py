@@ -7,14 +7,17 @@ Usage: Run from docker/ocr-ensemble with `python -m unittest discover -s tests -
 
 from __future__ import annotations
 
+import io
+import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-from app.engines import EngineResult
-from app.main import _run_ensemble
+from app.engines import BaseEngine, EngineResult, _optional_float, numeric_tokens
+from app.main import _render_document, _run_ensemble
 from app.storage import AuditStore
 
 
@@ -46,6 +49,34 @@ class MainRoutingTests(unittest.TestCase):
         self.assertEqual(["tesseract"], [result.engine for result in results])
         select.assert_called_once_with(["tesseract"])
         fuse.assert_called_once_with(results, allow_auto_accept=False)
+
+
+class DocumentLimitTests(unittest.TestCase):
+    """Verify durable document limits reject oversized work before OCR starts."""
+
+    def test_source_byte_limit_rejects_before_decoding(self) -> None:
+        """Reject an oversized upload before a parser can allocate for it."""
+        from fastapi import HTTPException
+
+        with patch("app.main._MAX_SOURCE_BYTES", 3):
+            with self.assertRaises(HTTPException) as raised:
+                _render_document(b"four", "image/png", "scan.png")
+
+        self.assertEqual(413, raised.exception.status_code)
+
+    def test_image_pixel_limit_rejects_decoded_image(self) -> None:
+        """Reject a valid image whose raster exceeds the configured pixel cap."""
+        from fastapi import HTTPException
+        from PIL import Image
+
+        image = Image.new("RGB", (3, 2))
+        encoded = io.BytesIO()
+        image.save(encoded, format="PNG")
+        with patch("app.main._MAX_PAGE_PIXELS", 5):
+            with self.assertRaises(HTTPException) as raised:
+                _render_document(encoded.getvalue(), "image/png", "scan.png")
+
+        self.assertEqual(413, raised.exception.status_code)
 
 
 class _Cursor:
@@ -99,6 +130,47 @@ class _Connection:
         return self._cursor
 
 
+class EngineInitializationTests(unittest.TestCase):
+    """Verify expensive engine setup cannot race between health and OCR threads."""
+
+    def test_loader_runs_once_under_concurrent_availability_checks(self) -> None:
+        """Serialize simultaneous first-use checks through the engine load lock."""
+        calls = 0
+        calls_lock = threading.Lock()
+
+        class _SlowEngine(BaseEngine):
+            """Synthetic loader that records every attempted initialization."""
+
+            def _load(self) -> object:
+                nonlocal calls
+                with calls_lock:
+                    calls += 1
+                threading.Event().wait(0.02)
+                return lambda image: ("", None, [])
+
+        engine = _SlowEngine()
+        threads = [threading.Thread(target=lambda: engine.available) for _ in range(12)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(1, calls)
+
+    def test_numeric_normalization_preserves_decimal_commas_and_ids(self) -> None:
+        """Handle common European and US values without converting commas blindly."""
+        self.assertEqual(
+            ["1.5", "1234.56", "2024", "01", "03", "001,234", "5.0"],
+            numeric_tokens("1,5 1.5 1,234.56 1.234,56 2024-01-03 ID 001,234 dose 5,0"),
+        )
+
+    def test_non_finite_confidence_is_rejected(self) -> None:
+        """Keep NaN and infinity out of JSON and confidence calculations."""
+        self.assertIsNone(_optional_float("nan"))
+        self.assertIsNone(_optional_float("inf"))
+        self.assertEqual(0.5, _optional_float("0.5"))
+
+
 class AuditStoreTests(unittest.TestCase):
     """Verify filesystem cleanup and expiry predicates for durable audit storage."""
 
@@ -125,6 +197,26 @@ class AuditStoreTests(unittest.TestCase):
 
             self.assertFalse((store.root / str(document_id)).exists())
 
+    def test_artifact_quota_rejects_before_writing_files(self) -> None:
+        """Reject a document that would exceed the retained-artifact quota."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = AuditStore()
+            store.root = Path(directory)
+            store.max_artifact_bytes = 1
+            store.cleanup_expired = lambda: 0
+
+            with self.assertRaisesRegex(ValueError, "artifact quota"):
+                store.save_document_with_audits(
+                    document_id=uuid4(),
+                    filename="scan.png",
+                    media_type="image/png",
+                    source=b"source",
+                    pages=[b"page"],
+                    audits=[{"review": True}],
+                )
+
+            self.assertEqual([], list(Path(directory).iterdir()))
+
     def test_document_read_queries_filter_expired_records(self) -> None:
         """Include a database expiry predicate after cleanup to close read races."""
         store = AuditStore()
@@ -139,6 +231,40 @@ class AuditStoreTests(unittest.TestCase):
         store._connect = lambda: _Connection(document_cursor)
         self.assertIsNone(store.get_document(uuid4()))
         self.assertIn("expires_at > now()", document_cursor.queries[0])
+
+
+@unittest.skipUnless(
+    os.environ.get("OCR_TEST_POSTGRES_DSN"), "requires OCR_TEST_POSTGRES_DSN"
+)
+class PostgresAuditIntegrationTests(unittest.TestCase):
+    """Exercise psycopg JSONB adaptation against a real PostgreSQL server."""
+
+    def test_audit_is_inserted_as_jsonb(self) -> None:
+        """Persist an audit and have PostgreSQL report its actual JSONB column type."""
+        import psycopg
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AuditStore()
+            store.root = Path(directory)
+            store._connect = lambda: psycopg.connect(
+                os.environ["OCR_TEST_POSTGRES_DSN"]
+            )
+            store.initialize()
+            document_id = uuid4()
+            store.save_document_with_audits(
+                document_id=document_id,
+                filename="one-page.png",
+                media_type="image/png",
+                source=b"source",
+                pages=[b"page"],
+                audits=[{"review": True, "engine_outputs": {"ppocrv5": {}}}],
+            )
+            with store._connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_typeof(audit)::text, audit->>'review' FROM ocr_pages WHERE document_id = %s",
+                    (document_id,),
+                )
+                self.assertEqual(("jsonb", "true"), cursor.fetchone())
 
 
 if __name__ == "__main__":

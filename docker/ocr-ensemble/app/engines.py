@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
+import threading
 from io import BytesIO
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +32,8 @@ MINERU_MODEL_PATH = os.environ.get(
     "OCR_MINERU_MODEL_PATH", f"{MODELS_DIR}/mineru/MinerU2.5-Pro-2605-1.2B"
 )
 PADDLE_LANGUAGE = os.environ.get("OCR_PADDLE_LANGUAGE", "en")
+PADDLE_DETECTION_MODEL_DIR = os.environ.get("OCR_PADDLE_DETECTION_MODEL_DIR")
+PADDLE_RECOGNITION_MODEL_DIR = os.environ.get("OCR_PADDLE_RECOGNITION_MODEL_DIR")
 TESSERACT_LANGUAGE = os.environ.get("OCR_TESSERACT_LANGUAGE", "eng")
 
 
@@ -77,15 +81,20 @@ class BaseEngine:
     def __init__(self) -> None:
         self._invoke: Any = None
         self._load_error: str | None = None
+        # Health probes and sync FastAPI handlers can arrive on distinct threads.
+        self._load_lock = threading.Lock()
 
     @property
     def available(self) -> bool:
-        """Whether the engine loaded successfully, loading it if never attempted."""
-        if self._invoke is None and self._load_error is None:
-            try:
-                self._invoke = self._load()
-            except Exception as exc:  # noqa: BLE001 - isolation is the contract here.
-                self._load_error = f"{type(exc).__name__}: {exc}"
+        """Whether the engine loaded successfully, initializing it exactly once."""
+        if self._invoke is not None or self._load_error is not None:
+            return self._invoke is not None
+        with self._load_lock:
+            if self._invoke is None and self._load_error is None:
+                try:
+                    self._invoke = self._load()
+                except Exception as exc:  # noqa: BLE001 - isolation is the contract here.
+                    self._load_error = f"{type(exc).__name__}: {exc}"
         return self._invoke is not None
 
     @property
@@ -105,7 +114,9 @@ class BaseEngine:
         """
         if not self.available:
             return EngineResult(
-                engine=self.name, kind=self.kind, error=f"unavailable: {self._load_error}"
+                engine=self.name,
+                kind=self.kind,
+                error=f"unavailable: {self._load_error}",
             )
         try:
             text, confidence, blocks = self._invoke(image)
@@ -195,6 +206,14 @@ class PPOCRv5Engine(BaseEngine):
     kind = "classical"
 
     def _load(self) -> Any:
+        for label, model_dir in (
+            ("detection", PADDLE_DETECTION_MODEL_DIR),
+            ("recognition", PADDLE_RECOGNITION_MODEL_DIR),
+        ):
+            if not model_dir or not os.path.isdir(model_dir):
+                raise EngineUnavailable(
+                    f"provisioned PP-OCRv5 {label} model directory is missing: {model_dir!r}"
+                )
         from paddleocr import PaddleOCR
 
         # The mobile PP-OCRv5 detector and recognizer are the small classical
@@ -207,6 +226,9 @@ class PPOCRv5Engine(BaseEngine):
             text_recognition_model_name=os.environ.get(
                 "OCR_PADDLE_RECOGNITION_MODEL", "PP-OCRv5_mobile_rec"
             ),
+            # These directories are host-provisioned before the isolated runtime starts.
+            text_detection_model_dir=PADDLE_DETECTION_MODEL_DIR,
+            text_recognition_model_dir=PADDLE_RECOGNITION_MODEL_DIR,
             lang=PADDLE_LANGUAGE,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
@@ -230,9 +252,7 @@ class PPOCRv5Engine(BaseEngine):
                         "type": "text",
                     }
                 )
-            mean_conf = (
-                sum(confidences) / len(confidences) if confidences else None
-            )
+            mean_conf = sum(confidences) / len(confidences) if confidences else None
             return "\n".join(lines), mean_conf, blocks
 
         return _run
@@ -256,6 +276,8 @@ class SuryaEngine(BaseEngine):
         url = os.environ.get("SURYA_CLIENT_URL", "http://surya-client:8091/ocr")
         timeout = float(os.environ.get("SURYA_CLIENT_TIMEOUT_SECONDS", "600"))
         client = httpx.Client(timeout=timeout)
+        ready = client.get(f"{url.rsplit('/', 1)[0]}/ready")
+        ready.raise_for_status()
 
         def _run(image: Any) -> tuple[str, float | None, list[dict[str, Any]]]:
             buffer = BytesIO()
@@ -326,9 +348,7 @@ class TesseractEngine(BaseEngine):
                         "type": "word",
                     }
                 )
-            mean_conf = (
-                sum(confidences) / len(confidences) if confidences else None
-            )
+            mean_conf = sum(confidences) / len(confidences) if confidences else None
             return " ".join(words), mean_conf, blocks
 
         return _run
@@ -419,7 +439,12 @@ def _pixel_bbox_to_normalized(
         return None
     try:
         return _clamp_bbox(
-            [float(left) / width, float(top) / height, float(right) / width, float(bottom) / height]
+            [
+                float(left) / width,
+                float(top) / height,
+                float(right) / width,
+                float(bottom) / height,
+            ]
         )
     except (TypeError, ValueError):
         return None
@@ -444,9 +469,10 @@ def _clamp_bbox(value: list[float]) -> list[float]:
 def _optional_float(value: Any) -> float | None:
     """Return a finite confidence value when one is supplied."""
     try:
-        return float(value) if value is not None else None
+        parsed = float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+    return parsed if parsed is None or math.isfinite(parsed) else None
 
 
 def _add(left: Any, right: Any) -> float:
@@ -464,7 +490,7 @@ def _tesseract_confidence(value: Any) -> float | None:
 
 
 def np_array(image: Any) -> Any:
-    """Convert a PIL image to the BGR ndarray PaddleOCR expects."""
+    """Convert a PIL image to RGB ndarray; verify channel order for the pinned release."""
     import numpy as np
 
     return np.asarray(image.convert("RGB"))
@@ -472,11 +498,36 @@ def np_array(image: Any) -> Any:
 
 # Numeric tokens are the concrete hallucination surface: a dosage, an amount, or an
 # identifier that appears in the parse but nowhere on the page.
-_NUMBER_PATTERN = re.compile(r"\d[\d,]*\.?\d*")
+_NUMBER_PATTERN = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def _normalize_numeric_token(token: str) -> str:
+    """Canonicalize common decimal/thousands punctuation without changing IDs."""
+    separators = [character for character in token if character in ".,"]
+    if not separators:
+        return token
+    first_group = re.split(r"[.,]", token, maxsplit=1)[0]
+    # Leading-zero values are frequently identifiers; punctuation is significant.
+    if len(first_group) > 1 and first_group.startswith("0"):
+        return token
+    if "." in token and "," in token:
+        decimal = max(token.rfind("."), token.rfind(","))
+        return (
+            token[:decimal].replace(".", "").replace(",", "")
+            + "."
+            + token[decimal + 1 :]
+        )
+    separator = separators[0]
+    groups = token.split(separator)
+    if len(groups) == 2 and len(groups[1]) == 3:
+        return "".join(groups)
+    if len(groups) > 2 and all(len(group) == 3 for group in groups[1:]):
+        return "".join(groups)
+    return "".join(groups[:-1]) + "." + groups[-1]
 
 
 def numeric_tokens(text: str) -> list[str]:
-    """Return numeric tokens from text, normalized by stripping thousands separators.
+    """Return locale-aware normalized numeric tokens, preserving ambiguous IDs.
 
     Args:
         text: Any OCR output.
@@ -487,7 +538,7 @@ def numeric_tokens(text: str) -> list[str]:
     seen: set[str] = set()
     tokens: list[str] = []
     for match in _NUMBER_PATTERN.findall(text):
-        normalized = match.replace(",", "")
+        normalized = _normalize_numeric_token(match)
         if normalized not in seen:
             seen.add(normalized)
             tokens.append(normalized)
