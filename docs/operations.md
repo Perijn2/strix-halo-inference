@@ -73,6 +73,40 @@ llama-swap kills a child whose `checkEndpoint` never turns ready within `healthC
 ### Profile commands run without a shell
 
 llama-swap shlex-splits a profile `cmd`, discards `#` lines, and execs `argv[0]` itself; it never spawns a shell. A leading `exec` is therefore looked up as a program literally named `exec` and the child dies with `exec: "exec": executable file not found in $PATH`, which is how the OCR forwarder was failing. The same applies to every other shell construct: `&&`, `||`, pipes, globs, and `$VAR` expansions are arguments rather than syntax. Only llama-swap's own substitution (`${PORT}`, macros) is applied. Write each profile command as one executable plus plain arguments; comment lines remain safe because they are stripped before splitting, which is why the Ciru `serve.sh` profile's comments do not break it.
+
+### Ciru model-name normalization
+
+vLLM validates the request body's `model` field against the single name its launch arguments advertise, and the Ciru release advertises `ciru-halo-agent` only. llama-swap resolves aliases for routing but forwards the body unchanged, so every other client-supplied ID is rejected by the engine with `The model ... does not exist` (404) before inference starts. Neither place can fix that upstream: the vendor release is mounted read-only at `/ornith` (only `bundle/cache` is writable), and Caddy's `request_body` directive can set a whole body but cannot rewrite one JSON field.
+
+`ciru-model-proxy` closes the gap inside the llama-swap image, mirroring `halogen-telemetry-proxy`. The Ciru profile's `cmd` starts the proxy instead of `serve.sh`; the proxy launches the vendor launcher on the next free loopback port and stays in front of it:
+
+- A `POST` whose JSON body names an accepted ID is rewritten to the served name on the way in, adding `X-Ciru-Model-Normalized: <requested id>` for traceability. Only that field changes: everything else, prompt text included, passes byte-for-byte, and a value quoting a model field inside a string cannot be mistaken for one.
+- The reply's `model` field is rewritten back to the ID the caller used, for buffered JSON and for each streamed SSE event, so callers that assert on the response ID keep working.
+- Any other name is forwarded unchanged and its 404 surfaces verbatim. Each distinct unmapped name logs one `ciru-model-proxy: unmapped model name ...` line into llama-swap's upstream log stream.
+- The proxy recomputes request and response framing instead of copying it, because the rewritten name changes the payload length; reusing the inbound `Content-Length` truncates longer names and hangs shorter ones. Chunked request bodies are refused with 400 rather than silently mis-forwarded.
+- The engine runs in its own process group, and `SIGTERM` escalates to `SIGKILL` after `--shutdown-grace` (30 s default) so the `EngineCore` child tree cannot survive as an orphan holding ~90 GiB of the unified pool.
+
+`CIRU_MODEL_ALIASES` (Compose default `role/implementer,role/tester,role/documenter,ornith-1.5-35b-a3b`) is the accepted set, `CIRU_SERVED_MODEL` names what it maps to, and `CIRU_SERVE_SCRIPT` names the launcher command. Widen the set in `.env` and recreate the llama-swap container; no image rebuild is needed. Keep the alias list and the router's `aliases:` / `setParamsByID` keys in step — an ID that routes but is not accepted here fails the other way round.
+
+**`ciru-ornith-1.5-halo-agent` is deliberately not an accepted body value.** That literal is the llama-swap model ID used by admin routes such as `POST /api/models/unload/ciru-ornith-1.5-halo-agent`, and sending it as the chat body's `model` still returns the engine's 404. If callers send it that way, append it to `CIRU_MODEL_ALIASES`; the router keeps its own ID regardless, so the two never collide.
+
+Verify after deployment:
+
+```bash
+# accepted alias: 200, reply names the caller's own ID, upstream log shows the rewrite
+curl -sS http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"role/implementer","messages":[{"role":"user","content":"say ok"}]}'
+
+# unmapped value: the engine's 404 plus one warning line
+docker compose logs llama-swap | grep 'ciru-model-proxy'
+
+# teardown: no engine process may outlive the proxy
+docker compose restart llama-swap
+sleep 5 && docker compose exec llama-swap sh -c 'ps -eo pid,cmd | grep "[s]erve.sh" | wc -l'
+```
+
+Unit and end-to-end coverage lives in `docker/llama-swap-halogen/tests/test_ciru_model_proxy.py`; run it with `python -m unittest docker/llama-swap-halogen/tests/test_ciru_model_proxy.py`. The end-to-end cases drive the real handler against a fake engine, so the framing rules stay enforced without a GPU.
+
 ## Update policy
 
 Pin and validate any production image digest after a successful soak test. Test llama.cpp fork updates with the PP512, PP2048, TG64, 64K-context, retrieval, OCR image request, review-verdict, and restart measurements before replacing the current image.

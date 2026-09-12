@@ -73,10 +73,16 @@ models:
     # This checkpoint is incompatible with llama.cpp and stock vLLM. The mounted
     # release includes its pinned runtime, custom kernels, DFlash2 drafter, and
     # launcher; preserve its supplied serving configuration.
+    # The packed release answers to exactly one served name (ciru-halo-agent) and
+    # vLLM rejects every other value with a 404 before inference. llama-swap only
+    # rewrites names for routing, so ciru-model-proxy sits in front of the vendor
+    # launcher: it starts serve.sh on the next free loopback port, maps the
+    # accepted IDs (CIRU_MODEL_ALIASES) to the served name, and restores each
+    # caller's own ID in the reply. See docs/operations.md.
     cmd: |
       # IU4 prefill requires the release's coupled agents64k configuration.
       # Do not override its context, cache, or sequence settings here.
-      bash /ornith/bundle/serve.sh --host 127.0.0.1 --port ${PORT}
+      ciru-model-proxy --port ${PORT}
     checkEndpoint: /health
     # Cold load (pinned torch.compile + ~53s warmup + CUDA-graph capture)
     # exceeds llama-swap's 120s default; without this larger window the router

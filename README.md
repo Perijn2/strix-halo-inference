@@ -78,7 +78,7 @@ After `docker compose up -d --build`, open `http://<server-lan-ip>:8080/ocr-play
 
 ## Ciru Ornith lifecycle
 
-The old `Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf` llama.cpp process is no longer used. llama-swap starts the Ciru launcher from `/ornith/bundle/serve.sh` on its first request, preserving its custom quantization, native kernels, DFlash2 drafter, prefix cache, and OpenAI-compatible tool calling. After it loads, `ttl: 0` keeps it resident beside Qwen until an explicit unload; `role/implementer`, `role/tester`, and `role/documenter` reuse that process.
+The old `Ornith-1.5-35B-A3B-Q4_0_ROCMFP4_STRIX_LEAN.gguf` llama.cpp process is no longer used. llama-swap starts the Ciru launcher from `/ornith/bundle/serve.sh` behind `ciru-model-proxy` on its first request, preserving its custom quantization, native kernels, DFlash2 drafter, prefix cache, and OpenAI-compatible tool calling. That release serves exactly one model name (`ciru-halo-agent`), so the proxy maps the accepted llama-swap IDs onto it and returns each caller's own ID in the reply; see [Ciru model-name normalization](docs/operations.md#ciru-model-name-normalization). After it loads, `ttl: 0` keeps it resident beside Qwen until an explicit unload; `role/implementer`, `role/tester`, and `role/documenter` reuse that process.
 
 ## Qwen lifecycle
 

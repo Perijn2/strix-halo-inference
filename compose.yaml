@@ -48,6 +48,13 @@ services:
       # The Ciru launcher reads this location through bundle/paths.env. It must
       # contain the release's installed-runtime directory created by its installer.
       ORNITH_RUNTIME_ROOT: /ornith/installed-runtime
+      # Naming contract: the Ciru release answers to one served name, so the
+      # sidecar in front of serve.sh maps these llama-swap IDs onto it and gives
+      # each caller its own ID back. Widen the list without a rebuild by setting
+      # CIRU_MODEL_ALIASES in .env; see docs/operations.md.
+      CIRU_SERVED_MODEL: "${CIRU_SERVED_MODEL:-ciru-halo-agent}"
+      CIRU_MODEL_ALIASES: "${CIRU_MODEL_ALIASES:-role/implementer,role/tester,role/documenter,ornith-1.5-35b-a3b}"
+      CIRU_SERVE_SCRIPT: "${CIRU_SERVE_SCRIPT:-bash /ornith/bundle/serve.sh}"
     volumes:
       - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
       - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
