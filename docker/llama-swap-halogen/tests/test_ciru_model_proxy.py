@@ -23,6 +23,12 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 CANONICAL = "ciru-halo-agent"
+FULL_USAGE = {
+    "prompt_tokens": 12,
+    "completion_tokens": 5,
+    "total_tokens": 17,
+    "prompt_tokens_details": {"cached_tokens": 4},
+}
 
 
 class CiruModelProxyTests(unittest.TestCase):
@@ -129,6 +135,79 @@ class CiruModelProxyTests(unittest.TestCase):
 
         self.assertEqual(back, body)
 
+    def test_usage_counts_extracts_prompt_completion_and_cached_tokens(self) -> None:
+        """Real vLLM usage blocks yield every timing anchor including cache hits."""
+        payload = json.dumps({"usage": FULL_USAGE}).encode()
+
+        self.assertEqual(MODULE.usage_counts(payload), (12, 5, 4))
+
+    def test_usage_counts_tolerates_missing_or_malformed_payloads(self) -> None:
+        """Nothing is invented when the response carries no usable counts."""
+        self.assertEqual(MODULE.usage_counts(b"not json"), (None, None, 0))
+        self.assertEqual(MODULE.usage_counts(b'{"usage": null}'), (None, None, 0))
+        self.assertEqual(
+            MODULE.usage_counts(b'{"usage": {"total_tokens": 7}}'), (None, None, 0)
+        )
+
+    def test_stream_timings_use_exact_wire_windows(self) -> None:
+        """A stream's prefill and decode windows are measured, not guessed."""
+        telemetry = MODULE.ChatTelemetry(started=100.0)
+        telemetry.note_body(101.5)
+        telemetry.note_body(111.5)
+        telemetry.note_usage(50, 100, 20)
+
+        timings = telemetry.as_timings(streaming=True)
+
+        self.assertEqual(timings["prompt_n"], 50)
+        self.assertEqual(timings["cache_n"], 20)
+        self.assertEqual(timings["predicted_n"], 100)
+        self.assertAlmostEqual(timings["prompt_ms"], 1500.0)
+        self.assertAlmostEqual(timings["predicted_ms"], 10000.0)
+        self.assertAlmostEqual(timings["prompt_per_second"], 20.0)
+        self.assertAlmostEqual(timings["predicted_per_second"], 10.0)
+
+    def test_non_stream_timings_report_conservative_end_to_end_windows(self) -> None:
+        """An unsplittable reply reports the whole request in both windows."""
+        telemetry = MODULE.ChatTelemetry(started=100.0)
+        telemetry.note_body(105.0)
+        telemetry.note_usage(10, 5, 0)
+
+        timings = telemetry.as_timings(streaming=False)
+
+        self.assertAlmostEqual(timings["prompt_ms"], 5000.0)
+        self.assertAlmostEqual(timings["predicted_ms"], 5000.0)
+        self.assertAlmostEqual(timings["prompt_per_second"], 2.0)
+        self.assertAlmostEqual(timings["predicted_per_second"], 1.0)
+
+    def test_timings_are_absent_without_usage_counts(self) -> None:
+        """No timing record is fabricated from an unanchored measurement."""
+        telemetry = MODULE.ChatTelemetry(started=100.0)
+        telemetry.note_body(101.0)
+
+        self.assertIsNone(telemetry.as_timings(streaming=True))
+        self.assertIsNone(telemetry.as_timings(streaming=False))
+
+    def test_collapsed_stream_decode_window_falls_back_to_the_whole_request(self) -> None:
+        """A single-burst stream never divides by a zero decode window."""
+        telemetry = MODULE.ChatTelemetry(started=100.0)
+        telemetry.note_body(101.0)
+        telemetry.note_usage(4, 1, 0)
+
+        timings = telemetry.as_timings(streaming=True)
+
+        self.assertAlmostEqual(timings["predicted_ms"], 1000.0)
+        self.assertAlmostEqual(timings["predicted_per_second"], 1.0)
+
+    def test_add_timings_decorates_objects_and_leaves_other_payloads(self) -> None:
+        """Only JSON objects receive the timings block; everything else stays exact."""
+        decorated = MODULE.add_timings(b'{"model": "x"}', {"prompt_n": 1})
+
+        self.assertEqual(
+            json.loads(decorated), {"model": "x", "timings": {"prompt_n": 1}}
+        )
+        self.assertEqual(MODULE.add_timings(b"nope", {"prompt_n": 1}), b"nope")
+        self.assertEqual(MODULE.add_timings(b"[1]", {"prompt_n": 1}), b"[1]")
+
     def test_launcher_argv_binds_the_vendor_launcher_to_the_inner_port(self) -> None:
         """The proxy chooses which port serve.sh binds, keeping the managed port free."""
         self.assertEqual(
@@ -211,8 +290,9 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
                 },
             )
             return
+        usage = payload.get("usage")
         if payload.get("stream"):
-            self._event_stream()
+            self._event_stream(usage if isinstance(usage, dict) else None)
             return
         self._json(
             200,
@@ -222,7 +302,7 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
                 "choices": [
                     {"index": 0, "message": {"role": "assistant", "content": "ok"}}
                 ],
-                "usage": {"total_tokens": 7},
+                "usage": usage if isinstance(usage, dict) else {"total_tokens": 7},
             },
         )
 
@@ -242,7 +322,7 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _event_stream(self) -> None:
+    def _event_stream(self, usage: dict | None = None) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -254,6 +334,17 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
                     "id": "chatcmpl-1",
                     "model": CANONICAL,
                     "choices": [{"index": 0, "delta": {"content": text}}],
+                }
+            )
+            self.wfile.write(f"data: {line}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        if usage is not None:
+            line = json.dumps(
+                {
+                    "id": "chatcmpl-1",
+                    "model": CANONICAL,
+                    "choices": [],
+                    "usage": usage,
                 }
             )
             self.wfile.write(f"data: {line}\n\n".encode("utf-8"))
@@ -308,6 +399,38 @@ class CiruModelProxyIntegrationTests(unittest.TestCase):
             )
             response = client.getresponse()
             return response.status, response.read()
+        finally:
+            client.close()
+
+    def _post_with_headers(self, payload: dict) -> tuple[int, bytes, dict[str, str]]:
+        client = http.client.HTTPConnection(
+            "127.0.0.1", self.proxy.server_address[1], timeout=10
+        )
+        try:
+            client.request(
+                "POST",
+                "/v1/chat/completions",
+                body=json.dumps(payload),
+                headers={"Content-Type": "application/json"},
+            )
+            response = client.getresponse()
+            return response.status, response.read(), dict(response.getheaders())
+        finally:
+            client.close()
+
+    def _stream(self, payload: dict) -> list[str]:
+        client = http.client.HTTPConnection(
+            "127.0.0.1", self.proxy.server_address[1], timeout=10
+        )
+        try:
+            client.request(
+                "POST",
+                "/v1/chat/completions",
+                body=json.dumps(payload),
+                headers={"Content-Type": "application/json"},
+            )
+            text = client.getresponse().read().decode("utf-8")
+            return [line for line in text.splitlines() if line.startswith("data: ")]
         finally:
             client.close()
 
@@ -457,6 +580,79 @@ class CiruModelProxyIntegrationTests(unittest.TestCase):
 
         self.assertEqual(status, 502)
         self.assertEqual(json.loads(body)["error"]["type"], "bad_gateway")
+
+    def test_non_stream_chat_gets_wire_timings_from_usage_counts(self) -> None:
+        """Real usage counts anchor a llama.cpp-compatible timings block for Activity."""
+        status, body, headers = self._post_with_headers(
+            {
+                "model": "role/implementer",
+                "messages": [{"role": "user", "content": "hi"}],
+                "usage": FULL_USAGE,
+            }
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("X-Ciru-Telemetry"), "wire")
+        reply = json.loads(body)
+        self.assertEqual(reply["model"], "role/implementer")
+        timings = reply["timings"]
+        self.assertEqual(timings["prompt_n"], 12)
+        self.assertEqual(timings["cache_n"], 4)
+        self.assertEqual(timings["predicted_n"], 5)
+        self.assertGreater(timings["prompt_ms"], 0.0)
+        self.assertEqual(timings["prompt_ms"], timings["predicted_ms"])
+        self.assertGreater(timings["predicted_per_second"], 0.0)
+
+    def test_non_stream_without_real_counts_gets_no_fabricated_timings(self) -> None:
+        """A usage block with only total_tokens anchors nothing and adds nothing."""
+        _, body, _ = self._post_with_headers(
+            {"model": "role/documenter", "messages": []}
+        )
+
+        self.assertNotIn("timings", json.loads(body))
+
+    def test_streamed_chat_inserts_timing_event_before_done(self) -> None:
+        """The derived timing event lands between the usage event and [DONE]."""
+        events = self._stream(
+            {
+                "model": "role/tester",
+                "stream": True,
+                "messages": [],
+                "usage": FULL_USAGE,
+            }
+        )
+
+        self.assertEqual(events[-1], "data: [DONE]")
+        self.assertEqual(list(json.loads(events[-2][6:])), ["timings"])
+        timings = json.loads(events[-2][6:])["timings"]
+        self.assertEqual(timings["prompt_n"], 12)
+        self.assertEqual(timings["cache_n"], 4)
+        self.assertEqual(timings["predicted_n"], 5)
+        usage_event = json.loads(events[-3][6:])
+        self.assertEqual(usage_event["model"], "role/tester")
+        for event in events[:2]:
+            self.assertEqual(json.loads(event[6:])["model"], "role/tester")
+
+    def test_stream_without_usage_counts_receives_no_timing_event(self) -> None:
+        """A client that never supplied usage gets its stream untouched."""
+        events = self._stream(
+            {"model": "role/documenter", "stream": True, "messages": []}
+        )
+
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[-1], "data: [DONE]")
+        for event in events[:-1]:
+            self.assertNotIn("timings", json.loads(event[6:]))
+
+    def test_canonical_direct_stream_still_receives_telemetry(self) -> None:
+        """Telemetry keys off the chat path, not the alias rewrite path."""
+        events = self._stream(
+            {"model": CANONICAL, "stream": True, "messages": [], "usage": FULL_USAGE}
+        )
+
+        self.assertEqual(events[-1], "data: [DONE]")
+        self.assertEqual(json.loads(events[-2][6:])["timings"]["predicted_n"], 5)
+        self.assertEqual(json.loads(events[-3][6:])["model"], CANONICAL)
 
 
 if __name__ == "__main__":
