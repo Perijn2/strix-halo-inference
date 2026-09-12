@@ -4,7 +4,9 @@ Author: Perijn
 Summary: Presents llama-swap's stable role IDs to a vLLM release that serves exactly one model name.
 Usage: llama-swap runs `ciru-model-proxy --port ${PORT}`. The proxy starts the vendor launcher on the
        next free loopback port, rewrites the request body's top-level model field to the single name the
-       release serves, and rewrites that name back to the caller's own ID in the response.
+       release serves, rewrites that name back to the caller's own ID in the response, and adds
+       llama.cpp-compatible `timings` to chat responses measured from the wire. On shutdown it stops and
+       drains the whole engine process group before exiting so teardown completes in order.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, ClassVar
 
@@ -100,6 +103,139 @@ def restore_response(
 ) -> bytes:
     """Restore the caller's own model ID over the canonical name in one response payload."""
     return substitute_model(payload, canonical_pattern, alias)
+
+
+CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+DONE_EVENTS = (b"data: [DONE]", b"data:[DONE]")
+
+
+def usage_counts(payload: bytes) -> tuple[int | None, int | None, int]:
+    """Read prompt, completion, and cached token counts from one JSON usage block."""
+    try:
+        usage = json.loads(payload).get("usage")
+    except (AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, None, 0
+    if not isinstance(usage, dict):
+        return None, None, 0
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    details = usage.get("prompt_tokens_details")
+    cached = details.get("cached_tokens", 0) if isinstance(details, dict) else 0
+    return (
+        prompt if isinstance(prompt, int) else None,
+        completion if isinstance(completion, int) else None,
+        cached if isinstance(cached, int) else 0,
+    )
+
+
+def timing_event(timings: dict[str, float | int]) -> bytes:
+    """Encode a harmless final OpenAI-compatible SSE chunk carrying timing metadata."""
+    return (
+        b"data: "
+        + json.dumps({"timings": timings}, separators=(",", ":")).encode()
+        + b"\n\n"
+    )
+
+
+def add_timings(payload: bytes, timings: dict[str, float | int]) -> bytes:
+    """Attach a llama.cpp-compatible timings object to a JSON response."""
+    try:
+        decoded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return payload
+    if not isinstance(decoded, dict):
+        return payload
+    decoded["timings"] = timings
+    return json.dumps(decoded, separators=(",", ":")).encode()
+
+
+class ChatTelemetry:
+    """Derive one chat response's llama.cpp-compatible timings from its wire clocks.
+
+    vLLM publishes no per-request ledger for the proxy to read, but the loopback
+    wire itself carries the engine's measurement windows: for a stream, the time
+    from request to first body chunk is the queued-prefill boundary and the
+    first-chunk-to-last-chunk window is the decode window. A non-streaming reply
+    cannot be split, so both fields report the whole end-to-end request, which
+    understates decode speed conservatively. Token counts come from the response's
+    OpenAI usage block, so no timing record is ever attached without real counts.
+    """
+
+    __slots__ = ("started", "first_byte", "last_byte", "prompt", "completion", "cached")
+
+    def __init__(self, started: float) -> None:
+        """Anchor the measurement at the moment this request started."""
+        self.started = started
+        self.first_byte: float | None = None
+        self.last_byte = started
+        self.prompt: int | None = None
+        self.completion: int | None = None
+        self.cached = 0
+
+    def note_body(self, when: float) -> None:
+        """Record that response body bytes arrived at this clock reading."""
+        if self.first_byte is None:
+            self.first_byte = when
+        self.last_byte = when
+
+    def note_usage(
+        self, prompt: int | None, completion: int | None, cached: int
+    ) -> None:
+        """Keep the latest real token counts seen on this response."""
+        if prompt is not None:
+            self.prompt = prompt
+        if completion is not None:
+            self.completion = completion
+        if cached:
+            self.cached = cached
+
+    def as_timings(self, *, streaming: bool) -> dict[str, float | int] | None:
+        """Return the timings block, or None while the anchoring counts are missing."""
+        if self.prompt is None or self.completion is None:
+            return None
+        first = self.first_byte if self.first_byte is not None else self.last_byte
+        whole = max(self.last_byte - self.started, 0.0)
+        if streaming:
+            prefill = max(first - self.started, 0.0)
+            decode = max(self.last_byte - first, 0.0)
+            if decode <= 0.0:
+                decode = whole
+        else:
+            prefill = whole
+            decode = whole
+        non_cached = max(self.prompt - self.cached, 0)
+        return {
+            "prompt_n": self.prompt,
+            "cache_n": self.cached,
+            "predicted_n": self.completion,
+            "prompt_ms": prefill * 1000.0,
+            "predicted_ms": decode * 1000.0,
+            "prompt_per_second": non_cached / prefill if prefill > 0 else 0,
+            "predicted_per_second": self.completion / decode if decode > 0 else 0,
+        }
+
+
+TRACKER_WARNING_FILTER = "ignore:resource_tracker:UserWarning"
+
+
+def engine_env() -> dict[str, str]:
+    """Copy this environment with one targeted filter for the vendor engine's stderr.
+
+    The pinned vLLM's abort-shutdown path leaves one short-lived multiprocessing
+    semaphore to Python 3.14's resource tracker, which the tracker then unlinks
+    itself while exiting; its ``leaked semaphore objects ... at shutdown``
+    UserWarning is that self-cleanup notice, not a deployment fault. Filtering
+    only that category keeps llama-swap's log stream readable while every other
+    warning still surfaces.
+    """
+    env = os.environ.copy()
+    existing = env.get("PYTHONWARNINGS", "")
+    if TRACKER_WARNING_FILTER in existing:
+        return env
+    env["PYTHONWARNINGS"] = (
+        f"{existing},{TRACKER_WARNING_FILTER}" if existing else TRACKER_WARNING_FILTER
+    )
+    return env
 
 
 class Engine:
@@ -265,6 +401,11 @@ class CiruProxyHandler(BaseHTTPRequestHandler):
         headers["Host"] = f"127.0.0.1:{self.inner_port}"
         if alias is not None:
             headers["X-Ciru-Model-Normalized"] = alias
+        is_chat = (
+            self.command == "POST"
+            and self.path.split("?", 1)[0] == CHAT_COMPLETIONS_PATH
+        )
+        telemetry = ChatTelemetry(time.monotonic()) if is_chat else None
         connection = http.client.HTTPConnection(
             "127.0.0.1", self.inner_port, timeout=self.read_timeout
         )
@@ -272,14 +413,19 @@ class CiruProxyHandler(BaseHTTPRequestHandler):
             connection.request(
                 self.command, self.path, body=payload or None, headers=headers
             )
-            self._relay(connection.getresponse(), alias)
+            self._relay(connection.getresponse(), alias, telemetry)
         except (ConnectionError, OSError, http.client.HTTPException) as exc:
             self._respond_unavailable(exc)
         finally:
             connection.close()
             self.close_connection = True
 
-    def _relay(self, response: http.client.HTTPResponse, alias: str | None) -> None:
+    def _relay(
+        self,
+        response: http.client.HTTPResponse,
+        alias: str | None,
+        telemetry: ChatTelemetry | None,
+    ) -> None:
         """Forward the reply with framing this proxy re-establishes for its own writes."""
         content_type = (response.getheader("Content-Type") or "").lower()
         framing = {
@@ -287,18 +433,30 @@ class CiruProxyHandler(BaseHTTPRequestHandler):
             for key, value in response.getheaders()
             if key.lower() not in RESPONSE_STRIP_HEADERS
         }
+        if telemetry is not None:
+            framing["X-Ciru-Telemetry"] = "wire"
         self.send_response(response.status, response.reason)
         if "text/event-stream" in content_type:
             for key, value in framing.items():
                 self.send_header(key, value)
             self.send_header("Connection", "close")
             self.end_headers()
-            if alias is None:
+            if telemetry is not None:
+                self._pump_chat_stream(response, alias, telemetry)
+            elif alias is None:
                 self._pump_raw(response)
             else:
                 self._pump_event_stream(response, alias)
             return
         payload = response.read()
+        if telemetry is not None:
+            telemetry.note_body(time.monotonic())
+            prompt, completion, cached = usage_counts(payload)
+            telemetry.note_usage(prompt, completion, cached)
+            if response.status == 200:
+                timings = telemetry.as_timings(streaming=False)
+                if timings is not None:
+                    payload = add_timings(payload, timings)
         if alias is not None:
             payload = restore_response(payload, self.canonical_pattern, alias)
         framing["Content-Length"] = str(len(payload))
@@ -330,6 +488,52 @@ class CiruProxyHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
         if buffered:
             self.wfile.write(restore_response(buffered, self.canonical_pattern, alias))
+            self.wfile.flush()
+
+    def _pump_chat_stream(
+        self,
+        response: http.client.HTTPResponse,
+        alias: str | None,
+        telemetry: ChatTelemetry,
+    ) -> None:
+        """Restore model naming and collect wire timings while streaming without delay.
+
+        The timing event, when the stream carried real usage counts, is inserted
+        immediately before the terminal ``[DONE]`` event, mirroring the Halogen
+        telemetry proxy's placement.
+        """
+        buffered = b""
+        sent_timing = False
+        while chunk := response.read(STREAM_CHUNK_BYTES):
+            telemetry.note_body(time.monotonic())
+            buffered += chunk
+            while b"\n" in buffered:
+                line, buffered = buffered.split(b"\n", 1)
+                stripped = line.strip()
+                if stripped.startswith(b"data:"):
+                    if b"usage" in stripped:
+                        prompt, completion, cached = usage_counts(
+                            stripped[5:].strip()
+                        )
+                        telemetry.note_usage(prompt, completion, cached)
+                    if not sent_timing and stripped in DONE_EVENTS:
+                        sent_timing = True
+                        timings = telemetry.as_timings(streaming=True)
+                        if timings is not None:
+                            self.wfile.write(timing_event(timings))
+                self.wfile.write(
+                    restore_response(line, self.canonical_pattern, alias)
+                    if alias is not None
+                    else line
+                )
+                self.wfile.write(b"\n")
+            self.wfile.flush()
+        if buffered:
+            self.wfile.write(
+                restore_response(buffered, self.canonical_pattern, alias)
+                if alias is not None
+                else buffered
+            )
             self.wfile.flush()
 
     def _respond_json(self, status: int, error: dict[str, object]) -> None:
