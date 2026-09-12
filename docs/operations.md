@@ -84,7 +84,7 @@ vLLM validates the request body's `model` field against the single name its laun
 - The reply's `model` field is rewritten back to the ID the caller used, for buffered JSON and for each streamed SSE event, so callers that assert on the response ID keep working.
 - Any other name is forwarded unchanged and its 404 surfaces verbatim. Each distinct unmapped name logs one `ciru-model-proxy: unmapped model name ...` line into llama-swap's upstream log stream.
 - The proxy recomputes request and response framing instead of copying it, because the rewritten name changes the payload length; reusing the inbound `Content-Length` truncates longer names and hangs shorter ones. Chunked request bodies are refused with 400 rather than silently mis-forwarded.
-- The engine runs in its own process group, and `SIGTERM` escalates to `SIGKILL` after `--shutdown-grace` (30 s default) so the `EngineCore` child tree cannot survive as an orphan holding ~90 GiB of the unified pool.
+- The engine runs in its own process group, and `SIGTERM` escalates to `SIGKILL` after `--shutdown-grace` (30 s default) so the `EngineCore` child tree cannot survive as an orphan holding ~90 GiB of the unified pool. The proxy then drains the group, waiting until no member is still alive before it exits, so llama-swap never sees the proxy gone while half-finished engine teardown still holds GPU state.
 
 `CIRU_MODEL_ALIASES` (Compose default `role/implementer,role/tester,role/documenter,ornith-1.5-35b-a3b`) is the accepted set, `CIRU_SERVED_MODEL` names what it maps to, and `CIRU_SERVE_SCRIPT` names the launcher command. Widen the set in `.env` and recreate the llama-swap container; no image rebuild is needed. Keep the alias list and the router's `aliases:` / `setParamsByID` keys in step — an ID that routes but is not accepted here fails the other way round.
 
@@ -106,6 +106,20 @@ sleep 5 && docker compose exec llama-swap sh -c 'ps -eo pid,cmd | grep "[s]erve.
 ```
 
 Unit and end-to-end coverage lives in `docker/llama-swap-halogen/tests/test_ciru_model_proxy.py`; run it with `python -m unittest docker/llama-swap-halogen/tests/test_ciru_model_proxy.py`. The end-to-end cases drive the real handler against a fake engine, so the framing rules stay enforced without a GPU.
+
+### Ciru PP/TG telemetry
+
+The Ciru release publishes no per-request `serve_api:` ledger, so `ciru-model-proxy` derives llama.cpp-compatible `timings` from the wire clocks of each `/v1/chat/completions` response and attaches them exactly the way `halogen-telemetry-proxy` does: inline in the JSON reply, and as a timing event immediately before the terminal SSE `[DONE]`. Decorated responses carry `X-Ciru-Telemetry: wire`.
+
+- For a stream the windows are exact: request-to-first-chunk is the queued-prefill window and first-chunk-to-last-chunk is the decode window, accurate to loopback overhead.
+- A non-streaming reply cannot be split, so both windows report the whole end-to-end request; its `predicted_per_second` therefore understates decode speed conservatively. Use streaming for exact per-token rates.
+- Token counts come only from the response's OpenAI `usage` block (`prompt_tokens`, `completion_tokens`, and `prompt_tokens_details.cached_tokens`). A stream must carry a usage event—request it with `stream_options: {"include_usage": true}`. Without real counts the proxy attaches no timings rather than inventing them, so a missing PP/TG value means the client omitted usage, not that the engine stalled.
+
+Confirm after deployment with a streaming request and `GET /api/metrics/activity?model=ciru-ornith-1.5-halo-agent`.
+
+### Unload teardown and the resource tracker warning
+
+Unloading Ciru Ornith—as required before loading it beside Qwen on this host—drives the engine's request-abort shutdown, and the pinned vLLM hands Python 3.14's `multiprocessing.resource_tracker` one short-lived `/mp-…` semaphore that the tracker unlinks itself while it exits. The `resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown` UserWarning is that self-cleanup notice, not a fault: the semaphore is reclaimed and no leak persists. The proxy silences exactly that category by setting `PYTHONWARNINGS=ignore:resource_tracker:UserWarning` in the engine environment (all other warnings still reach llama-swap's log stream) and drains the process group so the tracker finishes its unlink before the proxy exits and llama-swap continues the swap.
 
 ## Update policy
 
