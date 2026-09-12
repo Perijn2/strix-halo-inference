@@ -47,7 +47,9 @@ COPY --from=llama_swap_build /out/llama-swap /usr/local/bin/llama-swap
 COPY --from=llama_cpp_build /src/build/bin/ /usr/local/bin/
 COPY docker/llama-swap-halogen/scripts/halogen-launch.sh /usr/local/bin/halogen-launch
 COPY docker/llama-swap-halogen/scripts/halogen-telemetry-proxy.py /usr/local/bin/halogen-telemetry-proxy
+COPY docker/llama-swap-halogen/scripts/ciru-model-proxy.py /usr/local/bin/ciru-model-proxy
 RUN chmod 0755 /usr/local/bin/halogen-launch /usr/local/bin/halogen-telemetry-proxy \
+       /usr/local/bin/ciru-model-proxy \
     && printf '%s\n' /usr/local/bin > /etc/ld.so.conf.d/llama-server.conf \
     && ldconfig
 
