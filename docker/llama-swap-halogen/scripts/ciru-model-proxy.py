@@ -249,10 +249,18 @@ class Engine:
             argv,
             stdin=subprocess.DEVNULL,
             preexec_fn=os.setsid,
+            env=engine_env(),
         )
 
     def stop(self, grace_seconds: float) -> None:
-        """Terminate the whole process group and escalate to a kill when it will not exit."""
+        """Terminate the whole process group, then wait for that tree to actually leave.
+
+        The vendor launcher, API server, engine core, and their multiprocessing
+        resource tracker form one tree. The proxy must not exit the moment its
+        direct child is gone, or llama-swap moves on while half-finished
+        teardown still holds GPU state and tracker work; draining is what makes
+        a model switch land cleanly.
+        """
         self.stopping = True
         try:
             group = os.getpgid(self.process.pid)
@@ -264,27 +272,49 @@ class Engine:
             return
         try:
             self.process.wait(grace_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        print(
-            f"ciru-model-proxy: engine ignored SIGTERM within {grace_seconds:.0f}s, "
-            "sending SIGKILL",
-            file=sys.stderr,
-            flush=True,
-        )
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except ProcessLookupError:
-            return
-        try:
-            self.process.wait(10)
         except subprocess.TimeoutExpired:
             print(
-                "ciru-model-proxy: engine process group survived SIGKILL",
+                f"ciru-model-proxy: engine ignored SIGTERM within {grace_seconds:.0f}s, "
+                "sending SIGKILL",
                 file=sys.stderr,
                 flush=True,
             )
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            else:
+                try:
+                    self.process.wait(10)
+                except subprocess.TimeoutExpired:
+                    print(
+                        "ciru-model-proxy: engine process group survived SIGKILL",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+        self.drain(group, grace_seconds)
+
+    def drain(self, group: int, timeout: float) -> None:
+        """Return once no live process remains in the engine's process group.
+
+        This lets the final teardown messages—including the multiprocessing
+        resource tracker unlinking the last engine semaphore—land before
+        llama-swap proceeds with the swap. Anything still alive after the
+        window is reported rather than waited on forever.
+        """
+        deadline = time.monotonic() + max(timeout, 1.0)
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        print(
+            "ciru-model-proxy: engine process group still present after the "
+            "drain window; leaving it to finish",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def watch(self, on_exit: Callable[[int], None]) -> None:
         """Notify the supervisor once when the engine exits by itself."""
