@@ -38,6 +38,12 @@ MINERU_MODEL_PATH = os.environ.get(
 PADDLE_LANGUAGE = os.environ.get("OCR_PADDLE_LANGUAGE", "en")
 PADDLE_DETECTION_MODEL_DIR = os.environ.get("OCR_PADDLE_DETECTION_MODEL_DIR")
 PADDLE_RECOGNITION_MODEL_DIR = os.environ.get("OCR_PADDLE_RECOGNITION_MODEL_DIR")
+# PaddleX builds its cache and temp root from this value, falling back to HOME.
+# It has to be writable by the service account (UID 10001), and PaddleX reads it
+# at import time, so the adapter re-exports the resolved path before importing.
+PADDLE_CACHE_DIR = os.environ.get("PADDLE_PDX_CACHE_HOME") or os.path.expanduser(
+    "~/.paddlex"
+)
 TESSERACT_LANGUAGE = os.environ.get("OCR_TESSERACT_LANGUAGE", "eng")
 
 
@@ -217,6 +223,8 @@ class PPOCRv5Engine(BaseEngine):
     Non-autoregressive, so it cannot produce the fluent-hallucination class that
     the VLM engines can. It also reports per-line confidence, which no VLM here
     exposes. Runs on CPU because no PaddlePaddle ROCm build exists for gfx1151.
+    Its writable cache root comes from ``PADDLE_PDX_CACHE_HOME``, because PaddleX
+    otherwise derives that root from ``HOME`` and this service is not root.
     """
 
     name = "ppocrv5"
@@ -231,6 +239,22 @@ class PPOCRv5Engine(BaseEngine):
                 raise EngineUnavailable(
                     f"provisioned PP-OCRv5 {label} model directory is missing: {model_dir!r}"
                 )
+        # Make the cache root real before the vendor touches it. An unwritable
+        # root then names the knob that fixes it instead of surfacing a
+        # PermissionError for a directory no operator ever configured.
+        try:
+            os.makedirs(PADDLE_CACHE_DIR, exist_ok=True)
+            probe = os.path.join(PADDLE_CACHE_DIR, ".writability-probe")
+            with open(probe, "w", encoding="utf-8") as handle:
+                handle.write("ok")
+            os.remove(probe)
+        except OSError as exc:
+            raise EngineUnavailable(
+                f"Paddle cache directory {PADDLE_CACHE_DIR!r} is not writable by "
+                f"UID {os.getuid()}: {exc}. Set PADDLE_PDX_CACHE_HOME to a "
+                "directory the OCR service account owns."
+            ) from exc
+        os.environ["PADDLE_PDX_CACHE_HOME"] = PADDLE_CACHE_DIR
         from paddleocr import PaddleOCR
 
         # The mobile PP-OCRv5 detector and recognizer are the small classical

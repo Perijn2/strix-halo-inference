@@ -107,6 +107,11 @@ services:
       # Provisioned on the host by scripts/download-models.sh; no runtime downloads are allowed.
       OCR_PADDLE_DETECTION_MODEL_DIR: /models/paddle/PP-OCRv5_mobile_det
       OCR_PADDLE_RECOGNITION_MODEL_DIR: /models/paddle/PP-OCRv5_mobile_rec
+      # PaddleX derives its cache and temp root from HOME. The entrypoint hands the
+      # service UID 10001 together with that account's home, and pinning the cache
+      # root here keeps it out of /root no matter how the process is launched. Point
+      # it at a writable named volume if the cache must outlive the container.
+      PADDLE_PDX_CACHE_HOME: "${OCR_PADDLE_CACHE_DIR:-/home/ocr/.paddlex}"
       OCR_TESSERACT_LANGUAGE: "${OCR_TESSERACT_LANGUAGE:-eng}"
       OCR_AGREE_THRESHOLD: "${OCR_AGREE_THRESHOLD:-0.92}"
       OCR_CLASSICAL_PAIR_AGREE: "${OCR_CLASSICAL_PAIR_AGREE:-0.90}"
