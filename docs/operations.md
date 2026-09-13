@@ -62,6 +62,23 @@ The defaults in `.env.example` are starting points, not benchmark-derived guaran
 4. Tune only with a held-out split. Never tune against the same pages used to assert an error rate.
 5. Choose a review capacity target, then measure fault discovery at that queue depth. Do not turn off a structural or numeric review rule to make the queue shorter.
 
+### PaddleX cache ownership
+
+A `/health` body that reports `ppocrv5: PermissionError: [Errno 13] Permission denied: '/root/.paddlex/temp'` while the other three engines are live means the entrypoint's privilege drop left the old root `HOME` in place. PaddleX builds its cache and temp root from `HOME`, or from `PADDLE_PDX_CACHE_HOME` when that is set, while the service itself runs as UID 10001 and cannot create anything inside root's `0700` home. The other engines read their weights from explicit local paths and needed no writes under `HOME`, which is why only PP-OCRv5 fails. Because `/health` requires all four engines, this one unwritable path keeps `role/ocr` returning 503. The entrypoint now carries `HOME=/home/ocr` across the drop and Compose pins `PADDLE_PDX_CACHE_HOME`, so neither resolves into `/root`. Do not repair this by widening `/root` permissions or by running the service as root.
+
+Verify after a rebuild:
+
+```bash
+docker compose up -d --build ocr-ensemble
+docker compose exec -T ocr-ensemble python -c "
+import json, urllib.request
+body = json.loads(urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=15).read())
+print(body['status'], body['engines']['ppocrv5'])
+"
+```
+
+`ok {'kind': 'classical', 'available': True, 'error': None}` is the pass condition, and `docker compose logs ocr-ensemble` must show `engine ppocrv5 loaded in ...s` instead of a `failed to load` line. An error that still names `/root/.paddlex` means the running image predates the entrypoint fix, so rebuild rather than edit the environment.
+
 ## Model lifecycle
 
 No llama-swap profiles, groups, or swap matrix restrict the configured Qwen, Ciru Ornith, retrieval, and OCR-forwarder processes; each starts on its first request and then remains loaded because its TTL is zero. Memory limits—not profile names—remain the practical resource boundary. `role/implementer`, `role/tester`, and `role/documenter` use the Ciru runtime directly. You can explicitly unload Qwen through `POST /api/models/unload/qwen3.8-flash-next` or Ciru Ornith through `POST /api/models/unload/ciru-ornith-1.5-halo-agent`; the next matching role request reloads it. Do not rely on an idle timeout.
