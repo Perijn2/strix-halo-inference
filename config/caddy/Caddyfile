@@ -1,6 +1,6 @@
 # Author: Perijn
-# Summary: Serves the same-origin OCR playground and forwards every other public inference request to llama-swap without application-level authentication.
-# Usage: Open /ocr-playground/ for the OCR UI; restrict network access with a host firewall or private network before exposing this listener.
+# Summary: Forwards every public inference request to llama-swap without application-level authentication.
+# Usage: Restrict network access with a host firewall or private network before exposing this listener.
 # Explicit HTTP catch-all: LAN IP requests commonly carry Host: <server-ip>, not localhost.
 http:// {
 
@@ -11,18 +11,6 @@ http:// {
 
 	request_body {
 		max_size 32MB
-	}
-
-	# The static OCR playground stays same-origin with the inference API, so it
-	# needs no separate CORS or authentication policy. Its audit calls still pass
-	# through llama-swap's stable ocr-ensemble upstream route.
-	handle /ocr-playground {
-		redir /ocr-playground/ permanent
-	}
-
-	handle_path /ocr-playground/* {
-		root * /srv/ocr-playground
-		file_server
 	}
 
 	handle {

@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
 # Author: Perijn
 # Summary: Repairs a drifted PostgreSQL credential by aligning the live role password with the current Compose secret file.
-# Usage: scripts/sync-postgres-secret.sh [--dry-run] [--no-restart] while the initialized postgres service is running; override ENV_FILE and COMPOSE_FILE for a non-default project.
+# Usage: scripts/sync-postgres-secret.sh [--dry-run] while the initialized postgres service is running; override ENV_FILE and COMPOSE_FILE for a non-default project.
 #
-# Core principle: the secret file is the source of truth and the audit ledger is never recreated.
+# Core principle: the secret file is the source of truth and the existing data volume is never recreated.
 # The Postgres image applies POSTGRES_PASSWORD_FILE only while it initializes an empty data
 # directory, so a secret that was replaced, restored, or reissued out of band never reaches the
 # stored scram verifier. pg_isready keeps reporting the service healthy because it authenticates
 # nothing, while every real client dies with `FATAL: password authentication failed`. This script
 # restores agreement in place through the container's trusted local socket, which needs no prior
-# password, so no volume is destroyed and no audit row is lost.
+# password, so no volume is destroyed and no stored row is lost.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 dry_run=false
-no_restart=false
 for argument in "$@"; do
   case "$argument" in
     --dry-run) dry_run=true ;;
-    --no-restart) no_restart=true ;;
     *)
-      printf 'Usage: scripts/sync-postgres-secret.sh [--dry-run] [--no-restart]\n' >&2
+      printf 'Usage: scripts/sync-postgres-secret.sh [--dry-run]\n' >&2
       exit 2
       ;;
   esac
@@ -137,18 +135,3 @@ if ! probe; then
 fi
 
 printf 'Reconciled: scram-sha-256 now accepts %s for user "%s".\n' "$secret_file" "$postgres_user"
-
-# A live ensemble reconnects per operation and recovers on its own; a crash-looped
-# one never reached that code path, so converge it explicitly and without touching
-# dependencies, reporting what was actually done rather than assuming. Recovery
-# uses --no-restart because its temporary Compose environment stands in for values
-# the real deployment has not been configured with yet.
-if [[ "$no_restart" == false ]] && docker compose -f "$compose_file" config --services 2>/dev/null | grep -qx 'ocr-ensemble'; then
-  if docker compose -f "$compose_file" ps -a -q ocr-ensemble | grep -q .; then
-    docker compose -f "$compose_file" restart ocr-ensemble >/dev/null 2>&1 || true
-    printf '%s\n' 'Restarted ocr-ensemble so it re-reads the secret.'
-  else
-    docker compose -f "$compose_file" up -d --no-deps ocr-ensemble >/dev/null 2>&1 || true
-    printf '%s\n' 'Started ocr-ensemble.'
-  fi
-fi

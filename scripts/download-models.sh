@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Author: Perijn
-# Summary: Downloads the Ciru release and every OCR/retrieval model required by the isolated runtime.
+# Summary: Downloads the Ciru release and the retrieval models required by the isolated runtime.
 # Usage: Copy .env.example to .env, configure paths, install `hf`, then run this script on the Strix Halo Linux host.
 # The runtime inference network is intentionally internal: this provisioning step must complete before Compose starts.
 set -euo pipefail
@@ -78,26 +78,10 @@ hf download Qwen/Qwen3-Embedding-4B-GGUF \
 hf download gpustack/bge-reranker-v2-m3-GGUF \
   bge-reranker-v2-m3-Q8_0.gguf \
   --local-dir "$MODELS_DIR/bge-reranker"
-hf download opendatalab/MinerU2.5-Pro-2605-1.2B \
-  --local-dir "$MODELS_DIR/mineru/MinerU2.5-Pro-2605-1.2B"
-hf download datalab-to/surya-ocr-2-gguf \
-  surya-2.gguf \
-  surya-2-mmproj.gguf \
-  --local-dir "$MODELS_DIR/surya"
-
-# PaddleOCR 3.x accepts these explicit local directories. Keeping its model
-# acquisition here makes a clean runtime work without outbound Internet access.
-hf download PaddlePaddle/PP-OCRv5_mobile_det \
-  --local-dir "$MODELS_DIR/paddle/PP-OCRv5_mobile_det"
-hf download PaddlePaddle/PP-OCRv5_mobile_rec \
-  --local-dir "$MODELS_DIR/paddle/PP-OCRv5_mobile_rec"
 
 printf '%s\n' \
   'Downloaded static artifacts:' \
   '  - Ornith 1.5 Ciru Halo Agent release + pinned runtime' \
-  '  - MinerU2.5-Pro-2605-1.2B (Transformers primary)' \
-  '  - Surya 2 GGUF + multimodal projector (Vulkan validator)' \
-  '  - PP-OCRv5 mobile detector and recognizer (explicit local Paddle paths)' \
   '' \
   'Run scripts/validate.sh, then docker compose up -d --build. The LAN gateway is' \
   'plain HTTP; verify curl http://<server-ip>:8080/v1/models before sending documents.'

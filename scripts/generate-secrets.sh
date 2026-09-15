@@ -239,7 +239,7 @@ first_initialization() {
   if command -v docker >/dev/null 2>&1 &&
     { postgres_container_exists "$probe_env" || postgres_volume_exists "$probe_env"; }; then
     printf '%s\n' 'Refusing to mint a new credential: a postgres container or postgres_data volume already exists here, and its stored verifier is unknown to the missing secret file.' >&2
-    printf '%s\n' 'Run scripts/generate-secrets.sh --recover to create a new credential and reconcile it without discarding the audit ledger.' >&2
+    printf '%s\n' 'Run scripts/generate-secrets.sh --recover to create a new credential and reconcile it without discarding the existing database.' >&2
     exit 1
   fi
   mv -f "$temporary_password" "$postgres_password_file"
