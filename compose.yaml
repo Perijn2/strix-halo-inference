@@ -1,13 +1,13 @@
 # Author: Perijn
-# Summary: Runs the Strix Halo inference gateway, GGUF/Halogen router, four-engine OCR ensemble, and durable PostgreSQL audit/RAG ledger.
+# Summary: Runs the Strix Halo inference gateway, the llama-swap router for Halogen, Ciru Ornith, and the retrieval models, plus the PostgreSQL store that backs RAG and telemetry.
 # Usage: Copy .env.example to .env, configure model directories and host group IDs, run scripts/download-models.sh, then run `docker compose up -d`.
-# Core principle: Caddy exposes only llama-swap; llama-swap owns stable role IDs. role/ocr is a supervised local forwarder to an isolated Python ensemble.
-# Setup: Download the model artifacts before starting. The OCR workers retain the strict 12 GiB combined default cap: 6 GiB for MinerU/classical engines, 2 GiB for the Surya SDK client, and 4 GiB for the Surya VLM worker.
-# Workflow: Query /v1/chat/completions with model role/ocr for plain fused text; call the internal /ocr endpoint through llama-swap upstream access only when you need the audit payload.
-# API guide: /v1/models lists role IDs. /v1/chat/completions accepts a base64 image_url for role/ocr. /upstream/ocr-ensemble/ocr exposes the structured OCR review result.
-# Worked example: `docker compose up -d`, then POST an OpenAI image message with `model: role/ocr` to Caddy. Pages with the review flag must go to a human queue.
+# Core principle: Caddy exposes only llama-swap; llama-swap owns stable role IDs.
+# Setup: Download the model artifacts before starting. Qwen, Ciru Ornith, and the retrieval models are resident at the same time, so read the host-memory guidance in docs/operations.md before adding workloads.
+# Workflow: Send chat, embedding, and rerank requests to stable role IDs through Caddy; llama-swap loads each model on its first routed request and keeps it loaded until an explicit unload.
+# API guide: /v1/models lists role IDs. /v1/chat/completions, /v1/embeddings, and /v1/rerank are all routed by role.
+# Worked example: `docker compose up -d`, then POST an OpenAI chat message with `model: role/orchestrator` to Caddy.
 services:
-  # Summary: HTTP-only LAN edge proxy that forwards inference requests and serves the OCR playground.
+  # Summary: HTTP-only LAN edge proxy that forwards inference requests.
   # Notes: This gateway has no application authentication; restrict the published port with a host firewall or private LAN.
   caddy:
     image: caddy:2-alpine
@@ -16,7 +16,6 @@ services:
       - "${CADDY_HTTP_PORT:-8080}:80"
     volumes:
       - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./web/ocr-playground:/srv/ocr-playground:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
@@ -24,7 +23,7 @@ services:
         condition: service_healthy
     networks: [edge, inference]
 
-  # Summary: Single public inference router and lifecycle owner for Halogen, llama.cpp models, and the supervised OCR forwarder.
+  # Summary: Single public inference router and lifecycle owner for Halogen, Ciru Ornith, and the llama.cpp retrieval models.
   llama-swap:
     image: strix-halo/llama-swap-halogen:local
     build:
@@ -78,157 +77,17 @@ services:
       memlock: -1
     networks: [inference]
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)\""]
+      test:
+        [
+          "CMD-SHELL",
+          'python3 -c "import urllib.request; urllib.request.urlopen(''http://127.0.0.1:8080/health'', timeout=3)"',
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 30s
 
-  # Summary: Memory-capped Python coordinator for MinerU, PP-OCRv5, Tesseract, and Consensus Entropy; calls the compatible Surya SDK client over the internal network.
-  # Notes: Default CPU execution avoids unvalidated gfx1151 ROCm/Paddle paths. Switching MinerU to vLLM requires a separately validated TheRock image and an explicit utilization cap.
-  ocr-ensemble:
-    image: strix-halo/ocr-ensemble:local
-    build:
-      context: .
-      dockerfile: docker/ocr-ensemble/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      surya-client:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    environment:
-      MODELS_DIR: /models
-      OCR_DEVICE: "${OCR_DEVICE:-cpu}"
-      OCR_MINERU_BACKEND: "${OCR_MINERU_BACKEND:-transformers}"
-      OCR_MINERU_MODEL_PATH: /models/mineru/MinerU2.5-Pro-2605-1.2B
-      OCR_VLLM_GPU_MEMORY_UTILIZATION: "${OCR_VLLM_GPU_MEMORY_UTILIZATION:-0.35}"
-      OCR_PADDLE_LANGUAGE: "${OCR_PADDLE_LANGUAGE:-en}"
-      # Provisioned on the host by scripts/download-models.sh; no runtime downloads are allowed.
-      OCR_PADDLE_DETECTION_MODEL_DIR: /models/paddle/PP-OCRv5_mobile_det
-      OCR_PADDLE_RECOGNITION_MODEL_DIR: /models/paddle/PP-OCRv5_mobile_rec
-      # PaddleX derives its cache and temp root from HOME. The entrypoint hands the
-      # service UID 10001 together with that account's home, and pinning the cache
-      # root here keeps it out of /root no matter how the process is launched. Point
-      # it at a writable named volume if the cache must outlive the container.
-      PADDLE_PDX_CACHE_HOME: "${OCR_PADDLE_CACHE_DIR:-/home/ocr/.paddlex}"
-      OCR_TESSERACT_LANGUAGE: "${OCR_TESSERACT_LANGUAGE:-eng}"
-      OCR_AGREE_THRESHOLD: "${OCR_AGREE_THRESHOLD:-0.92}"
-      OCR_CLASSICAL_PAIR_AGREE: "${OCR_CLASSICAL_PAIR_AGREE:-0.90}"
-      OCR_CLASSICAL_PAIR_HARD: "${OCR_CLASSICAL_PAIR_HARD:-0.75}"
-      OCR_ENTROPY_ACCEPT_MAX: "${OCR_ENTROPY_ACCEPT_MAX:-0.25}"
-      OCR_ENTROPY_REVIEW_FLOOR: "${OCR_ENTROPY_REVIEW_FLOOR:-0.60}"
-      OCR_AUDIT_DATA_DIR: /audit-data
-      OCR_AUDIT_RETENTION_DAYS: "${OCR_AUDIT_RETENTION_DAYS:-90}"
-      OCR_MAX_SOURCE_BYTES: "${OCR_MAX_SOURCE_BYTES:-25165824}"
-      OCR_MAX_DOCUMENT_PAGES: "${OCR_MAX_DOCUMENT_PAGES:-100}"
-      OCR_MAX_PAGE_PIXELS: "${OCR_MAX_PAGE_PIXELS:-40000000}"
-      OCR_AUDIT_MAX_BYTES: "${OCR_AUDIT_MAX_BYTES:-2147483648}"
-      OCR_AUDIT_DB_HOST: postgres
-      OCR_AUDIT_DB_NAME: "${POSTGRES_DB:-inference}"
-      OCR_AUDIT_DB_USER: "${POSTGRES_USER:-inference}"
-      # The root-only Compose secret is copied by the entrypoint before it drops
-      # privileges to the OCR account; the application never runs as root.
-      OCR_AUDIT_DB_PASSWORD_FILE: /run/ocr-secrets/postgres_password
-      SURYA_CLIENT_URL: http://surya-client:8091/ocr
-    volumes:
-      - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
-      - ocr_cache:/model-cache
-      - ocr_audit_data:/audit-data
-    secrets: [postgres_password]
-    devices:
-      - /dev/kfd:/dev/kfd
-      - /dev/dri:/dev/dri
-    group_add:
-      - "${RENDER_GID:?run scripts/generate-secrets.sh to set RENDER_GID}"
-      - "${VIDEO_GID:?run scripts/generate-secrets.sh to set VIDEO_GID}"
-    security_opt: [seccomp:unconfined]
-    ipc: host
-    ulimits:
-      memlock: -1
-    mem_limit: "${OCR_ENSEMBLE_MEMORY_LIMIT_GIB:-6}g"
-    networks: [inference]
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=10)\""]
-      interval: 30s
-      timeout: 15s
-      retries: 10
-      start_period: 10m
-
-  # Summary: Compatibility-isolated Surya SDK client that translates ensemble page requests into Surya's remote VLM protocol.
-  # Notes: This exists because the SDK requires Pillow <11 and MinerU requires Pillow >=11; it does not hold the Surya VLM weights.
-  surya-client:
-    image: strix-halo/surya-client:local
-    build:
-      context: .
-      dockerfile: docker/surya-client/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      surya:
-        condition: service_healthy
-    environment:
-      SURYA_INFERENCE_URL: http://surya:8080/v1
-      SURYA_INFERENCE_AUTOSTART: "false"
-      SURYA_TORCH_DEVICE: "${OCR_DEVICE:-cpu}"
-      SURYA_MODEL_CACHE_DIR: /model-cache/surya
-    volumes:
-      - ocr_cache:/model-cache
-    mem_limit: "${OCR_SURYA_CLIENT_MEMORY_LIMIT_GIB:-2}g"
-    networks: [inference]
-    healthcheck:
-      # Readiness constructs the SDK predictor and verifies the remote Surya worker.
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/ready', timeout=30)\""]
-      interval: 30s
-      timeout: 45s
-      retries: 5
-      start_period: 10m
-
-  # Summary: Surya 2 VLM worker using the existing Vulkan llama.cpp build; only the isolated Surya SDK client calls it on the internal network.
-  # Notes: The 4 GiB worker plus 6 GiB ensemble and 2 GiB SDK-client caps retain the chosen 12 GiB total OCR budget. Do not raise --parallel without a fresh memory benchmark.
-  surya:
-    image: strix-halo/llama-swap-halogen:local
-    build:
-      context: .
-      dockerfile: docker/llama-swap-halogen/Dockerfile
-    restart: unless-stopped
-    entrypoint: [llama-server]
-    command:
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --model
-      - /models/surya/surya-2.gguf
-      - --mmproj
-      - /models/surya/surya-2-mmproj.gguf
-      - --n-gpu-layers
-      - "999"
-      - --ctx-size
-      - "16384"
-      - --parallel
-      - "1"
-    volumes:
-      - ${MODELS_DIR:?set MODELS_DIR in .env}:/models:ro
-    devices:
-      - /dev/kfd:/dev/kfd
-      - /dev/dri:/dev/dri
-    group_add:
-      - "${RENDER_GID:?run scripts/generate-secrets.sh to set RENDER_GID}"
-      - "${VIDEO_GID:?run scripts/generate-secrets.sh to set VIDEO_GID}"
-    security_opt: [seccomp:unconfined]
-    ipc: host
-    ulimits:
-      memlock: -1
-    mem_limit: "${OCR_SURYA_MEMORY_LIMIT_GIB:-4}g"
-    networks: [inference]
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)\""]
-      interval: 30s
-      timeout: 5s
-      retries: 10
-      start_period: 3m
-
-  # Summary: Durable PostgreSQL ledger for OCR audits and optional RAG metadata; it does not participate in model routing.
+  # Summary: Durable PostgreSQL store for RAG vectors and telemetry metadata; it does not participate in model routing.
   postgres:
     image: pgvector/pgvector:0.8.6-pg17-bookworm
     restart: unless-stopped
@@ -240,7 +99,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./config/postgres/init/001-enable-pgvector.sql:/docker-entrypoint-initdb.d/001-enable-pgvector.sql:ro
-      - ./config/postgres/init/002-ocr-audit-history.sql:/docker-entrypoint-initdb.d/002-ocr-audit-history.sql:ro
     networks: [inference]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
@@ -250,18 +108,18 @@ services:
 
 networks:
   edge: {}
+  # Summary: Internal-only network for container-to-container inference traffic; it has no route to the outside world.
   inference:
     internal: true
 
 volumes:
   caddy_data: {}
   caddy_config: {}
-  ocr_cache: {}
   # Writable Ciru first-start cache overlaid on the otherwise read-only release.
   ornith_cache: {}
-  ocr_audit_data: {}
   postgres_data: {}
 
 secrets:
+  # Summary: Root-only PostgreSQL password, read from the host secrets directory and mounted into the database container.
   postgres_password:
     file: ${POSTGRES_PASSWORD_FILE:?set POSTGRES_PASSWORD_FILE in .env}
