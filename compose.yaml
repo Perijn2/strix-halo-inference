@@ -63,6 +63,39 @@ services:
       # rather than poisoning it.
       HALOGEN_CACHE_DIR: /halogen-cache
       HALOGEN_CACHE_DISK_GIB: "${HALOGEN_CACHE_DISK_GIB:-64}"
+      # Composable context, on as a deliberate experiment. It retains each message at
+      # or above the floor the first time it is read and reuses that work when the
+      # same text reappears at any position behind the same system prompt. That is
+      # exactly the shape of an agent harness compaction: the head of a transcript is
+      # replaced by a summary while the tool results are kept verbatim, so the model
+      # reads only the summary and the new turn fresh. The win is large -- upstream
+      # measured a 146k-token re-prefill at 179s for the first turn after one
+      # compaction, which this turns into a couple of seconds.
+      # This is the one switch in this file that changes answers. It is NUMERIC and
+      # explicitly not byte-identical: a reused answer is very close to, but not the
+      # answer you would get from reading the text fresh. Upstream reports retrieval
+      # held at the same rate in testing and calls it a preview that should get more
+      # accurate and broader in later releases. Image requests are never composed.
+      # It needs the prompt cache at 2 and the KV pool enabled, both set above.
+      # /health reports it under composable_context and the finish line names how
+      # many chunks a request reused, so the effect is measurable in the log.
+      HALOGEN_COMPOSABLE_CONTEXT: "1"
+      # The retention floor is left at the 2048-token default: shorter messages are
+      # read fresh every time. The retained store is host memory, not disk, costing
+      # about 230 MB per retained message whatever its length, bounded by
+      # HALOGEN_COMPOSABLE_CONTEXT_BYTES (4 GiB, roughly 18 messages, least recently
+      # used out). Unlike the prompt cache above it does not survive a restart, so it
+      # never competes for the cache volume's space.
+      # The indexer budget is not a cache setting at all: it is how much of the
+      # context the model attends, the top budget/4 blocks per query plus the tail.
+      # 4096 retrieves two more of 96 planted long-context facts than the checkpoint's
+      # 2048, for about 7% of prefill speed at 32k and about 2% of decode. 8192
+      # retrieves every fact but at a consistent perplexity cost and a fifth of
+      # prefill, which is not a trade worth making here. This is NUMERIC too: past
+      # 2048 every query attends a superset of what the checkpoint was trained on, so
+      # long-prompt answers stop being byte-identical. /health reports it as
+      # indexer_budget and the effective value is printed at startup.
+      HALOGEN_INDEXER_BUDGET: "4096"
       # Vision is on, and the version bump is what allows it. 0.10.1 fixed the stale
       # image-position table that made a text turn inherit the previous image turn's
       # positions on a cache hit, but that fix freed the table's buffer while keeping
