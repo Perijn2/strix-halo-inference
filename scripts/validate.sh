@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Author: Perijn
-# Summary: Validates deployment configuration, required model artifacts, and Ciru runtime prerequisites.
+# Summary: Validates deployment configuration, the Halogen and Ciru model artifacts, and the Ciru runtime prerequisites.
 # Usage: Create .env, run scripts/generate-secrets.sh and scripts/download-models.sh, then run this script before deployment.
 # Values are parsed as data rather than evaluated, so .env cannot execute shell code during validation.
 set -euo pipefail
@@ -45,6 +45,27 @@ test "$ORNITH_RUNTIME_PYTHON_ROOT" = "$expected_python_root" || {
   printf 'ORNITH_RUNTIME_PYTHON_ROOT does not match the Ciru venv interpreter\n' >&2
   exit 1
 }
+
+# Halogen artifacts. The entrypoint's own checks for the quality sidecar warn and
+# carry on, so a stale sidecar is easy to miss here; check it in the gate instead.
+: "${HALOGEN_MODELS_DIR:?HALOGEN_MODELS_DIR is required in .env.}"
+halogen_ckpt="$HALOGEN_MODELS_DIR/qwen38-flash-next-w4b.hgn"
+test -f "$halogen_ckpt" || {
+  printf 'Missing Halogen checkpoint: %s\n' "$halogen_ckpt" >&2
+  exit 1
+}
+# The sidecar path is derived from the checkpoint name by the image entrypoint as
+# "<checkpoint>.overlay.hgn" beside it. 0.6.0 grew it from 2.31 to 2.40 GiB by
+# adding the 8-bit draft-head projections (~4% of decode on prose), so anything
+# under 2.35 GiB under this name predates that and is silently costing the gap.
+halogen_overlay="${halogen_ckpt%.hgn}.overlay.hgn"
+overlay_min=$((2350 * 1073741824 / 1000))
+if [[ ! -f "$halogen_overlay" ]]; then
+  printf 'WARN: no quality sidecar at %s; the bare checkpoint loses the 8-bit draft-head projections.\n' "$halogen_overlay" >&2
+elif (( $(stat -c %s "$halogen_overlay") < overlay_min )); then
+  printf 'WARN: %s predates 0.6.0 (no 8-bit draft-head entries). Refresh it with:\n      hf download peonist-ai/halogen-qwen3.8-flash-next %s --local-dir %s\n' \
+    "$halogen_overlay" "$(basename "$halogen_overlay")" "$HALOGEN_MODELS_DIR" >&2
+fi
 
 # The vendor launcher does not implement --dry-run; syntax-check it instead of
 # accidentally starting an inference server during preflight validation.
