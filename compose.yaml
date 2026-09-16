@@ -30,6 +30,10 @@ services:
       context: .
       dockerfile: docker/llama-swap-halogen/Dockerfile
     restart: unless-stopped
+    # Docker's 10s default stop window can cut off prompt-cache state that is still
+    # being written behind a long request. 60s matches the upstream bundled compose
+    # and keeps a restart from throwing away cache that was about to land.
+    stop_grace_period: 60s
     command:
       - -config
       - /etc/llama-swap/config/config.yaml
@@ -44,6 +48,21 @@ services:
       HALOGEN_KV_POOL_POSITIONS: "262144"
       HALOGEN_HOST_RESERVE_GIB: "${HALOGEN_HOST_RESERVE_GIB:-28}"
       HALOGEN_PROMPT_CACHE: "2"
+      # The prompt cache persists to disk so a conversation survives a server restart.
+      # Each turn's new state is written behind the request, so nothing on the request
+      # path waits for the drive, and a conversation no longer resident in memory is
+      # restored from disk byte-identically to the in-memory resume. That is what
+      # makes a restart cheap: a warm conversation comes back in seconds instead of
+      # paying a full re-prefill. Plan on about 27 KiB per cached token, bounded by
+      # HALOGEN_CACHE_DISK_GIB, which drops least-recently-used conversations first.
+      # This must be a filesystem that accepts direct I/O. A tmpfs or an overlay is
+      # refused and the cache silently stays in memory only, which still works but
+      # buys nothing, so this is a named volume on real host storage rather than a
+      # tmpfs mount. Every build, weights file, and setting keeps its own files and
+      # never restores another's, so changing the checkpoint invalidates the cache
+      # rather than poisoning it.
+      HALOGEN_CACHE_DIR: /halogen-cache
+      HALOGEN_CACHE_DISK_GIB: "${HALOGEN_CACHE_DISK_GIB:-64}"
       # Vision is on, and the version bump is what allows it. 0.10.1 fixed the stale
       # image-position table that made a text turn inherit the previous image turn's
       # positions on a cache hit, but that fix freed the table's buffer while keeping
@@ -85,6 +104,10 @@ services:
       - ${ORNITH_RUNTIME_PYTHON_ROOT:?run scripts/download-models.sh to set ORNITH_RUNTIME_PYTHON_ROOT}:${ORNITH_RUNTIME_PYTHON_ROOT}:ro
       # Ciru builds GPU/runtime artifacts here on first start; keep release files immutable.
       - ornith_cache:/ornith/bundle/cache
+      # Writable home for the persistent Halogen prompt cache. Deliberately a named
+      # volume and not a tmpfs: the cache needs direct I/O and it has to outlive the
+      # container, which is the entire point.
+      - halogen_cache:/halogen-cache
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
@@ -137,6 +160,10 @@ volumes:
   caddy_config: {}
   # Writable Ciru first-start cache overlaid on the otherwise read-only release.
   ornith_cache: {}
+  # Persistent Halogen prompt cache. Grows to HALOGEN_CACHE_DISK_GIB at most, with
+  # least-recently-used conversations dropped past that. Safe to delete: it costs
+  # cold-prefill time, never correctness.
+  halogen_cache: {}
   postgres_data: {}
 
 secrets:
