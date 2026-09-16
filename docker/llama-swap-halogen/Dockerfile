@@ -35,14 +35,20 @@ RUN git clone https://github.com/LaurentZuijdwijk/llama.cpp.git /src \
     && cmake -S /src -B /src/build -DGGML_VULKAN=ON -DGGML_NATIVE=ON -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /src/build --target llama-server --parallel
 
-# Step A of the Halogen ladder: 0.5.6 -> 0.8.1. Halogen carries llama.cpp-shaped
-# ``timings`` on every response since 0.7.0, so the API needs no timing sidecar
-# between it and llama-swap. 0.8.1 also brings the 0.5.7..0.8.1 wire fixes and
-# enforced JSON schema while keeping the pre-0.11 cache-entry default. The image
-# layout is identical to 0.5.6: ENTRYPOINT /usr/local/bin/entrypoint.sh, CMD
-# ``all``, HALOGEN_API_PORT=8731, Python 3.12.14 on the same ROCm SDK paths.
-# Step B takes 0.11.1; see docs/operations.md, "Halogen version ladder".
-FROM ghcr.io/peonist-ai/halogen-flash-server:0.8.1
+# Step B of the Halogen ladder: 0.8.1 -> 0.11.1. This is the release that makes the
+# vision tower safe to enable. 0.10.1 fixed the stale image-position table that let a
+# text turn inherit the previous image turn's positions on a cache hit and drift into
+# greedy decoding, but that fix dropped the table's buffer while keeping its size, so
+# the next image on the same slot reused a freed buffer and killed the engine
+# (upstream #62) on the order text -> image -> text -> image, which is any client
+# that sends a chat title or a summary between image turns. 0.11.1 keeps the buffer.
+# 0.11.0 also keeps each conversation's two most recently used history entries, so
+# the HALOGEN_CACHE_ENTRIES default is 12 rather than 8, evicts the KV pool by region
+# instead of by global age, and reserves answer room so thinking cannot consume all of
+# max_tokens. The image layout is unchanged from 0.5.6: ENTRYPOINT
+# /usr/local/bin/entrypoint.sh, CMD ``all``, HALOGEN_API_PORT=8731, Python 3.12.14
+# on the same ROCm SDK paths; the one added ENV in 0.11.1 is HALOGEN_IMAGE_VERSION.
+FROM ghcr.io/peonist-ai/halogen-flash-server:0.11.1
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
