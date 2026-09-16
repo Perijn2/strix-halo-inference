@@ -55,16 +55,29 @@ models:
         repetition_penalty?: 1.0
       # Preserve the stable agent-role endpoints without exposing Qwen effort
       # variants as separate general-purpose models.
+      # The 1.0 in setParams above is a default for raw base-model requests
+      # only. Every thinking role below overrides it with Qwen's recommended
+      # thinking sampling of 0.6 / 0.95 / 20 rather than inheriting 1.0, which
+      # is the non-thinking default and degrades tool-call reliability.
       setParamsByID:
         role/orchestrator:
           enable_thinking: true
           reasoning_effort: high
+          temperature: 0.6
+          top_p: 0.95
+          top_k: 20
         role/architect:
           enable_thinking: true
           reasoning_effort: high
+          temperature: 0.6
+          top_p: 0.95
+          top_k: 20
         role/reviewer:
           enable_thinking: true
           reasoning_effort: high
+          temperature: 0.6
+          top_p: 0.95
+          top_k: 20
         role/general:
           enable_thinking: false
           reasoning_effort: low
@@ -118,6 +131,11 @@ models:
       setParamsByID:
         # Thinking uses the model's recommended moderate sampling settings to
         # preserve reasoning and tool-use reliability.
+        role/coordinator:
+          enable_thinking: true
+          temperature: 0.6
+          top_p: 0.95
+          top_k: 20
         role/implementer:
           enable_thinking: true
           temperature: 0.6

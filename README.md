@@ -24,6 +24,7 @@ Reliable Docker Compose inference for a dedicated Ryzen AI Max+ 395 / Radeon 806
 | `role/orchestrator` | Halogen Qwen, thinking/high |
 | `role/architect` | Halogen Qwen, thinking/high |
 | `role/reviewer` | Halogen Qwen, thinking/high |
+| `role/coordinator` | Ornith 1.5 Ciru Halo Agent, thinking |
 | `role/implementer` | Ornith 1.5 Ciru Halo Agent, thinking |
 | `role/tester` | Ornith 1.5 Ciru Halo Agent, thinking |
 | `role/documenter` | Ornith 1.5 Ciru Halo Agent, fast |

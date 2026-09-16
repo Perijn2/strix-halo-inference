@@ -124,7 +124,7 @@ services:
       # each caller its own ID back. Widen the list without a rebuild by setting
       # CIRU_MODEL_ALIASES in .env; see docs/operations.md.
       CIRU_SERVED_MODEL: "${CIRU_SERVED_MODEL:-ciru-halo-agent}"
-      CIRU_MODEL_ALIASES: "${CIRU_MODEL_ALIASES:-role/implementer,role/tester,role/documenter,ornith-1.5-35b-a3b}"
+      CIRU_MODEL_ALIASES: "${CIRU_MODEL_ALIASES:-role/coordinator,role/implementer,role/tester,role/documenter,ornith-1.5-35b-a3b}"
       CIRU_SERVE_SCRIPT: "${CIRU_SERVE_SCRIPT:-bash /ornith/bundle/serve.sh}"
     volumes:
       - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
