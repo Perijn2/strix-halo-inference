@@ -35,7 +35,14 @@ RUN git clone https://github.com/LaurentZuijdwijk/llama.cpp.git /src \
     && cmake -S /src -B /src/build -DGGML_VULKAN=ON -DGGML_NATIVE=ON -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /src/build --target llama-server --parallel
 
-FROM ghcr.io/peonist-ai/halogen-flash-server:0.5.6
+# Step A of the Halogen ladder: 0.5.6 -> 0.8.1. Halogen carries llama.cpp-shaped
+# ``timings`` on every response since 0.7.0, so the API needs no timing sidecar
+# between it and llama-swap. 0.8.1 also brings the 0.5.7..0.8.1 wire fixes and
+# enforced JSON schema while keeping the pre-0.11 cache-entry default. The image
+# layout is identical to 0.5.6: ENTRYPOINT /usr/local/bin/entrypoint.sh, CMD
+# ``all``, HALOGEN_API_PORT=8731, Python 3.12.14 on the same ROCm SDK paths.
+# Step B takes 0.11.1; see docs/operations.md, "Halogen version ladder".
+FROM ghcr.io/peonist-ai/halogen-flash-server:0.8.1
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
