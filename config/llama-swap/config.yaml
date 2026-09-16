@@ -6,6 +6,14 @@ apiKeys: []
 globalTTL: 0
 unloadTimeout: 60
 
+# Publish every alias - including the role IDs auto-registered from each model's
+# ``filters.setParamsByID`` keys - as its own ``/v1/models`` entry. Left at the
+# default ``false``, the listing returns only the five base model IDs and the
+# roles show up solely inside each record's ``meta.llamaswap.aliases`` array.
+# Clients that read only the top-level ``data[].id`` field, such as the DSH
+# pi-ai model discovery, therefore never see ``role/...`` at all.
+includeAliasesInList: true
+
 # Models start lazily on their first request. Individual ``ttl: 0`` settings
 # keep successfully loaded models resident until an explicit unload request.
 
