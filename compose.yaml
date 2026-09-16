@@ -44,12 +44,6 @@ services:
       HALOGEN_KV_POOL_POSITIONS: "262144"
       HALOGEN_HOST_RESERVE_GIB: "${HALOGEN_HOST_RESERVE_GIB:-28}"
       HALOGEN_PROMPT_CACHE: "2"
-      # Step A rollback lever only. Halogen 0.7.0 and newer carry their own
-      # llama.cpp-shaped timings, so halogen-launch runs the API directly with no
-      # sidecar. Set HALOGEN_TIMING_PROXY=1 to put the pre-0.7.0 ledger-scraping
-      # proxy back in front if Activity ever loses PP/TG. Remove this at Step B:
-      # that proxy serialises every chat request behind one lock.
-      HALOGEN_TIMING_PROXY: "${HALOGEN_TIMING_PROXY:-0}"
       # The Ciru launcher reads this location through bundle/paths.env. It must
       # contain the release's installed-runtime directory created by its installer.
       ORNITH_RUNTIME_ROOT: /ornith/installed-runtime
