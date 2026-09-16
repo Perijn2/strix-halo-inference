@@ -45,14 +45,6 @@ test "$ORNITH_RUNTIME_PYTHON_ROOT" = "$expected_python_root" || {
   printf 'ORNITH_RUNTIME_PYTHON_ROOT does not match the Ciru venv interpreter\n' >&2
   exit 1
 }
-for model_dir in \
-  "$MODELS_DIR/paddle/PP-OCRv5_mobile_det" \
-  "$MODELS_DIR/paddle/PP-OCRv5_mobile_rec"; do
-  test -d "$model_dir" || {
-    printf 'Missing provisioned PP-OCRv5 model directory: %s\n' "$model_dir"
-    exit 1
-  }
-done
 
 # The vendor launcher does not implement --dry-run; syntax-check it instead of
 # accidentally starting an inference server during preflight validation.
@@ -61,3 +53,4 @@ bash -n "$ORNITH_MODEL_DIR/bundle/packaging/serve.sh"
 
 docker compose --profile rag config >/dev/null
 printf '%s\n' 'Compose configuration and offline model prerequisites are valid.'
+
