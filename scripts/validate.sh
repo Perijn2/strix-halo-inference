@@ -66,6 +66,23 @@ elif (( $(stat -c %s "$halogen_overlay") < overlay_min )); then
   printf 'WARN: %s predates 0.6.0 (no 8-bit draft-head entries). Refresh it with:\n      hf download peonist-ai/halogen-qwen3.8-flash-next %s --local-dir %s\n' \
     "$halogen_overlay" "$(basename "$halogen_overlay")" "$HALOGEN_MODELS_DIR" >&2
 fi
+# Compose enables the vision tower, and the models mount is read-only, so the
+# entrypoint cannot fetch the sidecar itself the way HALOGEN_DOWNLOAD would on a
+# writable volume. A missing tower therefore fails here at preflight rather than at
+# boot, which is the only place this repo can still catch it.
+halogen_vision="$HALOGEN_MODELS_DIR/qwen38-flash-next-vision.hgn"
+test -f "$halogen_vision" || {
+  printf 'Missing Halogen vision sidecar: %s\n    Compose enables it with HALOGEN_VISION_TOWER=1 but the models mount is read-only,\n    so it has to be on the host already. Fetch it with:\n      hf download peonist-ai/halogen-qwen3.8-flash-next %s --local-dir %s\n    Or set HALOGEN_VISION_TOWER to 0 in compose.yaml to run text-only.\n' \
+    "$halogen_vision" "$(basename "$halogen_vision")" "$HALOGEN_MODELS_DIR" >&2
+  exit 1
+}
+# 0.84 GiB delivered. A file far under that is an LFS pointer or a truncated
+# download, which the engine would only reject after loading the 115 GiB trunk.
+vision_min=$((700 * 1048576))
+if (( $(stat -c %s "$halogen_vision") < vision_min )); then
+  printf 'WARN: %s is under %s MiB and is probably not the real sidecar. Re-download it with:\n      hf download peonist-ai/halogen-qwen3.8-flash-next %s --local-dir %s\n' \
+    "$(basename "$halogen_vision")" 700 "$halogen_vision" "$HALOGEN_MODELS_DIR" >&2
+fi
 
 # The vendor launcher does not implement --dry-run; syntax-check it instead of
 # accidentally starting an inference server during preflight validation.
@@ -74,4 +91,3 @@ bash -n "$ORNITH_MODEL_DIR/bundle/packaging/serve.sh"
 
 docker compose --profile rag config >/dev/null
 printf '%s\n' 'Compose configuration and offline model prerequisites are valid.'
-
