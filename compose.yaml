@@ -44,6 +44,26 @@ services:
       HALOGEN_KV_POOL_POSITIONS: "262144"
       HALOGEN_HOST_RESERVE_GIB: "${HALOGEN_HOST_RESERVE_GIB:-28}"
       HALOGEN_PROMPT_CACHE: "2"
+      # Vision is on, and the version bump is what allows it. 0.10.1 fixed the stale
+      # image-position table that made a text turn inherit the previous image turn's
+      # positions on a cache hit, but that fix freed the table's buffer while keeping
+      # its size, so the next image on a slot that had carried one reused freed memory
+      # and took the engine down (upstream #62) on the order text -> image -> text ->
+      # image. Any client that sends a chat title or a summary between image turns
+      # produces exactly that order.
+      # Measured upstream end to end, one image costs 5.5s at 1280x800, 11.8s at
+      # 1080p, and 25.3s at 1440p; 4K costs 105.8s and reads no better than 1440p,
+      # which is why HALOGEN_VISION_MAX_PIXELS keeps its 3686400 (2560x1440) default
+      # rather than being raised. The tower is additional resident weight on the same
+      # unified memory the KV pool draws from; HALOGEN_DMALLOC_LOG=1 prints every
+      # device allocation over 64 MB with a running total at startup, so the cost can
+      # be measured on this host rather than guessed at.
+      # Images arrive only as a data: URL or bare base64 -- the server refuses http(s)
+      # by design so it never makes an outbound request on a client's say-so -- and
+      # Caddy's 32 MB request-body cap bounds the encoded image. The sidecar must be
+      # present on the host before start, since the models mount is read-only and the
+      # entrypoint cannot fetch it itself; scripts/validate.sh gates on it.
+      HALOGEN_VISION_TOWER: "1"
       # The Ciru launcher reads this location through bundle/paths.env. It must
       # contain the release's installed-runtime directory created by its installer.
       ORNITH_RUNTIME_ROOT: /ornith/installed-runtime
