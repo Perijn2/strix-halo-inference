@@ -31,6 +31,8 @@ Reliable Docker Compose inference for a dedicated Ryzen AI Max+ 395 / Radeon 806
 | `role/embed` | Qwen3-Embedding-4B |
 | `role/rerank` | BGE reranker v2-m3 |
 
+`role/coordinator` is the head of a Ciru agent swarm rather than a caller above it: it takes one long task, splits it into smaller ones, spawns and manages the sub-agents that do them, briefly reviews what comes back, and returns to the main Qwen agent once the brief it was given is met. It shares the Ornith engine, and with it the eight-sequence ceiling, rather than running on the Qwen side.
+
 llama-swap starts Qwen and Ciru Ornith lazily, without routing profiles or a swap matrix. All llama-swap children use `ttl: 0` and stay loaded until an explicit unload action. Ornith uses its vendor-required IU4 `agents64k` profile: 262K maximum model length, eight sequences, and a 44 GiB KV/state pool. It targets 80% of the 96 GiB GPU memory, so unload Qwen and other GPU workloads before loading Ornith on this host.
 
 ## Start

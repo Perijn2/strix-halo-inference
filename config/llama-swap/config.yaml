@@ -131,6 +131,15 @@ models:
       setParamsByID:
         # Thinking uses the model's recommended moderate sampling settings to
         # preserve reasoning and tool-use reliability.
+        # Swarm coordinator. Takes one long task, divides it into smaller ones,
+        # spawns and manages the sub-agents that run them, briefly reviews the
+        # results, and hands back to the main Qwen agent once the brief it was
+        # given is met. It runs on the Ciru engine beside the roles it
+        # supervises because it is part of the swarm rather than a caller above
+        # it, so its own turns draw on the same max_sequences budget as the
+        # workers. This placement is deliberate: do not "correct" it to
+        # qwen3.8-flash-next, and note the ID must also be named in
+        # CIRU_MODEL_ALIASES or the proxy refuses every call to it.
         role/coordinator:
           enable_thinking: true
           temperature: 0.6
