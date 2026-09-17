@@ -30,6 +30,10 @@ services:
       context: .
       dockerfile: docker/llama-swap-halogen/Dockerfile
     restart: unless-stopped
+    # Docker's 10s default stop window can cut off prompt-cache state that is still
+    # being written behind a long request. 60s matches the upstream bundled compose
+    # and keeps a restart from throwing away cache that was about to land.
+    stop_grace_period: 60s
     command:
       - -config
       - /etc/llama-swap/config/config.yaml
@@ -44,12 +48,74 @@ services:
       HALOGEN_KV_POOL_POSITIONS: "262144"
       HALOGEN_HOST_RESERVE_GIB: "${HALOGEN_HOST_RESERVE_GIB:-28}"
       HALOGEN_PROMPT_CACHE: "2"
-      # Step A rollback lever only. Halogen 0.7.0 and newer carry their own
-      # llama.cpp-shaped timings, so halogen-launch runs the API directly with no
-      # sidecar. Set HALOGEN_TIMING_PROXY=1 to put the pre-0.7.0 ledger-scraping
-      # proxy back in front if Activity ever loses PP/TG. Remove this at Step B:
-      # that proxy serialises every chat request behind one lock.
-      HALOGEN_TIMING_PROXY: "${HALOGEN_TIMING_PROXY:-0}"
+      # The prompt cache persists to disk so a conversation survives a server restart.
+      # Each turn's new state is written behind the request, so nothing on the request
+      # path waits for the drive, and a conversation no longer resident in memory is
+      # restored from disk byte-identically to the in-memory resume. That is what
+      # makes a restart cheap: a warm conversation comes back in seconds instead of
+      # paying a full re-prefill. Plan on about 27 KiB per cached token, bounded by
+      # HALOGEN_CACHE_DISK_GIB, which drops least-recently-used conversations first.
+      # This must be a filesystem that accepts direct I/O. A tmpfs or an overlay is
+      # refused and the cache silently stays in memory only, which still works but
+      # buys nothing, so this is a named volume on real host storage rather than a
+      # tmpfs mount. Every build, weights file, and setting keeps its own files and
+      # never restores another's, so changing the checkpoint invalidates the cache
+      # rather than poisoning it.
+      HALOGEN_CACHE_DIR: /halogen-cache
+      HALOGEN_CACHE_DISK_GIB: "${HALOGEN_CACHE_DISK_GIB:-64}"
+      # Composable context, on as a deliberate experiment. It retains each message at
+      # or above the floor the first time it is read and reuses that work when the
+      # same text reappears at any position behind the same system prompt. That is
+      # exactly the shape of an agent harness compaction: the head of a transcript is
+      # replaced by a summary while the tool results are kept verbatim, so the model
+      # reads only the summary and the new turn fresh. The win is large -- upstream
+      # measured a 146k-token re-prefill at 179s for the first turn after one
+      # compaction, which this turns into a couple of seconds.
+      # This is the one switch in this file that changes answers. It is NUMERIC and
+      # explicitly not byte-identical: a reused answer is very close to, but not the
+      # answer you would get from reading the text fresh. Upstream reports retrieval
+      # held at the same rate in testing and calls it a preview that should get more
+      # accurate and broader in later releases. Image requests are never composed.
+      # It needs the prompt cache at 2 and the KV pool enabled, both set above.
+      # /health reports it under composable_context and the finish line names how
+      # many chunks a request reused, so the effect is measurable in the log.
+      HALOGEN_COMPOSABLE_CONTEXT: "1"
+      # The retention floor is left at the 2048-token default: shorter messages are
+      # read fresh every time. The retained store is host memory, not disk, costing
+      # about 230 MB per retained message whatever its length, bounded by
+      # HALOGEN_COMPOSABLE_CONTEXT_BYTES (4 GiB, roughly 18 messages, least recently
+      # used out). Unlike the prompt cache above it does not survive a restart, so it
+      # never competes for the cache volume's space.
+      # The indexer budget is not a cache setting at all: it is how much of the
+      # context the model attends, the top budget/4 blocks per query plus the tail.
+      # 4096 retrieves two more of 96 planted long-context facts than the checkpoint's
+      # 2048, for about 7% of prefill speed at 32k and about 2% of decode. 8192
+      # retrieves every fact but at a consistent perplexity cost and a fifth of
+      # prefill, which is not a trade worth making here. This is NUMERIC too: past
+      # 2048 every query attends a superset of what the checkpoint was trained on, so
+      # long-prompt answers stop being byte-identical. /health reports it as
+      # indexer_budget and the effective value is printed at startup.
+      HALOGEN_INDEXER_BUDGET: "4096"
+      # Vision is on, and the version bump is what allows it. 0.10.1 fixed the stale
+      # image-position table that made a text turn inherit the previous image turn's
+      # positions on a cache hit, but that fix freed the table's buffer while keeping
+      # its size, so the next image on a slot that had carried one reused freed memory
+      # and took the engine down (upstream #62) on the order text -> image -> text ->
+      # image. Any client that sends a chat title or a summary between image turns
+      # produces exactly that order.
+      # Measured upstream end to end, one image costs 5.5s at 1280x800, 11.8s at
+      # 1080p, and 25.3s at 1440p; 4K costs 105.8s and reads no better than 1440p,
+      # which is why HALOGEN_VISION_MAX_PIXELS keeps its 3686400 (2560x1440) default
+      # rather than being raised. The tower is additional resident weight on the same
+      # unified memory the KV pool draws from; HALOGEN_DMALLOC_LOG=1 prints every
+      # device allocation over 64 MB with a running total at startup, so the cost can
+      # be measured on this host rather than guessed at.
+      # Images arrive only as a data: URL or bare base64 -- the server refuses http(s)
+      # by design so it never makes an outbound request on a client's say-so -- and
+      # Caddy's 32 MB request-body cap bounds the encoded image. The sidecar must be
+      # present on the host before start, since the models mount is read-only and the
+      # entrypoint cannot fetch it itself; scripts/validate.sh gates on it.
+      HALOGEN_VISION_TOWER: "1"
       # The Ciru launcher reads this location through bundle/paths.env. It must
       # contain the release's installed-runtime directory created by its installer.
       ORNITH_RUNTIME_ROOT: /ornith/installed-runtime
@@ -58,7 +124,7 @@ services:
       # each caller its own ID back. Widen the list without a rebuild by setting
       # CIRU_MODEL_ALIASES in .env; see docs/operations.md.
       CIRU_SERVED_MODEL: "${CIRU_SERVED_MODEL:-ciru-halo-agent}"
-      CIRU_MODEL_ALIASES: "${CIRU_MODEL_ALIASES:-role/implementer,role/tester,role/documenter,ornith-1.5-35b-a3b}"
+      CIRU_MODEL_ALIASES: "${CIRU_MODEL_ALIASES:-role/coordinator,role/implementer,role/tester,role/documenter,ornith-1.5-35b-a3b}"
       CIRU_SERVE_SCRIPT: "${CIRU_SERVE_SCRIPT:-bash /ornith/bundle/serve.sh}"
     volumes:
       - ./config/llama-swap/config.yaml:/etc/llama-swap/config/config.yaml:ro
@@ -71,6 +137,10 @@ services:
       - ${ORNITH_RUNTIME_PYTHON_ROOT:?run scripts/download-models.sh to set ORNITH_RUNTIME_PYTHON_ROOT}:${ORNITH_RUNTIME_PYTHON_ROOT}:ro
       # Ciru builds GPU/runtime artifacts here on first start; keep release files immutable.
       - ornith_cache:/ornith/bundle/cache
+      # Writable home for the persistent Halogen prompt cache. Deliberately a named
+      # volume and not a tmpfs: the cache needs direct I/O and it has to outlive the
+      # container, which is the entire point.
+      - halogen_cache:/halogen-cache
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
@@ -123,6 +193,10 @@ volumes:
   caddy_config: {}
   # Writable Ciru first-start cache overlaid on the otherwise read-only release.
   ornith_cache: {}
+  # Persistent Halogen prompt cache. Grows to HALOGEN_CACHE_DISK_GIB at most, with
+  # least-recently-used conversations dropped past that. Safe to delete: it costs
+  # cold-prefill time, never correctness.
+  halogen_cache: {}
   postgres_data: {}
 
 secrets:

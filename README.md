@@ -24,11 +24,14 @@ Reliable Docker Compose inference for a dedicated Ryzen AI Max+ 395 / Radeon 806
 | `role/orchestrator` | Halogen Qwen, thinking/high |
 | `role/architect` | Halogen Qwen, thinking/high |
 | `role/reviewer` | Halogen Qwen, thinking/high |
+| `role/coordinator` | Ornith 1.5 Ciru Halo Agent, thinking |
 | `role/implementer` | Ornith 1.5 Ciru Halo Agent, thinking |
 | `role/tester` | Ornith 1.5 Ciru Halo Agent, thinking |
 | `role/documenter` | Ornith 1.5 Ciru Halo Agent, fast |
 | `role/embed` | Qwen3-Embedding-4B |
 | `role/rerank` | BGE reranker v2-m3 |
+
+`role/coordinator` is the head of a Ciru agent swarm rather than a caller above it: it takes one long task, splits it into smaller ones, spawns and manages the sub-agents that do them, briefly reviews what comes back, and returns to the main Qwen agent once the brief it was given is met. It shares the Ornith engine, and with it the eight-sequence ceiling, rather than running on the Qwen side.
 
 llama-swap starts Qwen and Ciru Ornith lazily, without routing profiles or a swap matrix. All llama-swap children use `ttl: 0` and stay loaded until an explicit unload action. Ornith uses its vendor-required IU4 `agents64k` profile: 262K maximum model length, eight sequences, and a 44 GiB KV/state pool. It targets 80% of the 96 GiB GPU memory, so unload Qwen and other GPU workloads before loading Ornith on this host.
 
@@ -54,9 +57,9 @@ qwen3-embedding/Qwen3-Embedding-4B-Q6_K.gguf
 bge-reranker/bge-reranker-v2-m3-Q8_0.gguf
 ```
 
-`HALOGEN_MODELS_DIR` is the flat model directory downloaded from the Halogen Qwen repository; it contains the `.hgn` checkpoint, quality overlay, and `tokenizer/` directory. `ORNITH_MODEL_DIR` must contain the complete [jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo](https://huggingface.co/jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo) release, including `bundle/`, `runtime/`, and `installed-runtime/`. The included installer creates `installed-runtime/runtime-env.sh`; `scripts/download-models.sh` also records the uv interpreter root in `ORNITH_RUNTIME_PYTHON_ROOT` so Compose can make its absolute venv symlink available to the container. Its pinned vLLM/ROCm runtime and custom kernels are required—stock vLLM and the prior llama.cpp GGUF are incompatible.
+`HALOGEN_MODELS_DIR` is the flat model directory `scripts/download-models.sh` writes from the Halogen Qwen repository; it contains the `.hgn` checkpoint, the quality overlay, the vision tower sidecar (`qwen38-flash-next-vision.hgn`, required while `HALOGEN_VISION_TOWER` is on), and the `tokenizer/` directory, which must stay a flat directory rather than a Hugging Face snapshot of symlinks. `scripts/validate.sh` gates on every one of them. `ORNITH_MODEL_DIR` must contain the complete [jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo](https://huggingface.co/jcbtc/Ornith1.5-Ciru-Halo-Agent-vllm-strix-halo) release, including `bundle/`, `runtime/`, and `installed-runtime/`. The included installer creates `installed-runtime/runtime-env.sh`; `scripts/download-models.sh` also records the uv interpreter root in `ORNITH_RUNTIME_PYTHON_ROOT` so Compose can make its absolute venv symlink available to the container. Its pinned vLLM/ROCm runtime and custom kernels are required—stock vLLM and the prior llama.cpp GGUF are incompatible.
 
-Use [`scripts/download-models.sh`](scripts/download-models.sh) to fetch the complete Ciru release, install its pinned runtime, and fetch the retrieval artifacts. Run it on the Linux Strix Halo host with sufficient disk space and memory; the published Ciru profile reports a 95.35 GiB peak whole-host measurement. Read [docs/operations.md](docs/operations.md) before operating Halogen.
+Use [`scripts/download-models.sh`](scripts/download-models.sh) to fetch the complete Ciru release, install its pinned runtime, fetch the Halogen weight set (about 119 GiB) and the retrieval artifacts. Run it on the Linux Strix Halo host with sufficient disk space and memory; the published Ciru profile reports a 95.35 GiB peak whole-host measurement. Read [docs/operations.md](docs/operations.md) before operating Halogen.
 
 ## Ciru Ornith lifecycle
 
